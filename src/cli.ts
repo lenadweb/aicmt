@@ -1,0 +1,37 @@
+import { Command } from 'commander';
+import { runCommit } from './commands/commit';
+import { runInit } from './commands/init';
+
+export async function run(argv: string[] = process.argv): Promise<void> {
+  const program = new Command();
+
+  program
+    .name('ai-committer')
+    .description('AI-assisted git commits via OpenRouter')
+    .version('0.1.0');
+
+  program
+    .command('init')
+    .description('Initialize ai-committer in this repository')
+    .option('-c, --config <path>', 'Path to config file')
+    .action(async (options: { config?: string }) => {
+      await runInit({ cwd: process.cwd(), configPath: options.config });
+    });
+
+  program
+    .command('commit')
+    .description('Generate and create a commit for staged changes')
+    .option('-c, --config <path>', 'Path to config file')
+    .option('--dry-run', 'Show the chosen message without committing', false)
+    .option('-v, --verbose', 'Show AI request and response logs', false)
+    .action(async (options: { config?: string; dryRun?: boolean; verbose?: boolean }) => {
+      await runCommit({
+        cwd: process.cwd(),
+        configPath: options.config,
+        dryRun: Boolean(options.dryRun),
+        verbose: Boolean(options.verbose),
+      });
+    });
+
+  await program.parseAsync(argv);
+}
