@@ -91,14 +91,6 @@ export async function getStagedDiff(repoRoot: string): Promise<string> {
   return result.stdout;
 }
 
-export async function getStagedFiles(repoRoot: string): Promise<string[]> {
-  const result = await runGit(['diff', '--cached', '--name-only'], repoRoot);
-  return result.stdout
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 export async function commitWithMessage(repoRoot: string, message: string): Promise<void> {
   if (!message.includes('\n')) {
     await runGit(['commit', '-m', message], repoRoot);

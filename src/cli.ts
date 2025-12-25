@@ -13,7 +13,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   program
     .command('init')
     .description('Initialize ai-committer in this repository')
-    .option('-c, --config <path>', 'Path to config file')
+    .option('-c, --config <path>', 'Path to global config file')
     .action(async (options: { config?: string }) => {
       await runInit({ cwd: process.cwd(), configPath: options.config });
     });
@@ -21,7 +21,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   program
     .command('commit')
     .description('Generate and create a commit for staged changes')
-    .option('-c, --config <path>', 'Path to config file')
+    .option('-c, --config <path>', 'Path to global config file')
     .option('--dry-run', 'Show the chosen message without committing', false)
     .option('-v, --verbose', 'Show AI request and response logs', false)
     .action(async (options: { config?: string; dryRun?: boolean; verbose?: boolean }) => {

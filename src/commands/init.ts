@@ -1,14 +1,18 @@
-import path from 'node:path';
 import prompts from 'prompts';
 import {
-  CONFIG_FILENAME,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MODEL,
   DEFAULT_TEMPERATURE,
+  MAX_OUTPUT_TOKENS,
+  MIN_OUTPUT_TOKENS,
 } from '../constants';
-import { resolveConfigPath, saveConfig } from '../config';
-import { fileExists } from '../fs';
-import { ensureGitignoreEntry } from '../gitignore';
+import {
+  GlobalConfig,
+  ProjectConfig,
+  loadGlobalConfig,
+  resolveConfigPath,
+  saveGlobalConfig,
+} from '../config';
 import { getRepoRoot, isGitRepo } from '../git';
 
 interface FormatChoice {
@@ -75,6 +79,20 @@ export interface InitOptions {
   configPath?: string;
 }
 
+function upsertProjectConfig(
+  globalConfig: GlobalConfig,
+  repoRoot: string,
+  projectConfig: ProjectConfig,
+): GlobalConfig {
+  return {
+    ...globalConfig,
+    projects: {
+      ...globalConfig.projects,
+      [repoRoot]: projectConfig,
+    },
+  };
+}
+
 export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
   const isRepo = await isGitRepo(cwd);
   if (!isRepo) {
@@ -84,12 +102,16 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
   const repoRoot = await getRepoRoot(cwd);
   const resolvedConfigPath = resolveConfigPath(repoRoot, configPath);
 
-  if (await fileExists(resolvedConfigPath)) {
+  const existingConfig = await loadGlobalConfig(resolvedConfigPath, {
+    allowMissing: true,
+  });
+
+  if (existingConfig.projects?.[repoRoot]) {
     const { overwrite } = await prompts(
       {
         type: 'confirm',
         name: 'overwrite',
-        message: `Config already exists at ${resolvedConfigPath}. Overwrite?`,
+        message: 'Config already exists for this repo. Overwrite?',
         initial: false,
       },
       promptOptions,
@@ -178,26 +200,54 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     {
       type: 'number',
       name: 'maxTokens',
-      message: 'Max tokens',
+      message: `Max tokens (${MIN_OUTPUT_TOKENS}-${MAX_OUTPUT_TOKENS})`,
       initial: DEFAULT_MAX_TOKENS,
-      min: 1,
+      min: MIN_OUTPUT_TOKENS,
+      max: MAX_OUTPUT_TOKENS,
     },
     promptOptions,
   );
 
-  const { apiKey } = await prompts(
-    {
-      type: 'password',
-      name: 'apiKey',
-      message: 'OpenRouter API key',
-      validate: (value: string) =>
-        value.trim().length > 0 ? true : 'API key is required.',
-    },
-    promptOptions,
-  );
+  let globalApiKey = existingConfig.openrouterApiKey ?? '';
+  if (globalApiKey) {
+    const { reuseKey } = await prompts(
+      {
+        type: 'confirm',
+        name: 'reuseKey',
+        message: 'Use existing global OpenRouter API key?',
+        initial: true,
+      },
+      promptOptions,
+    );
 
-  const config = {
-    openrouterApiKey: String(apiKey || '').trim(),
+    if (!reuseKey) {
+      const { apiKey } = await prompts(
+        {
+          type: 'password',
+          name: 'apiKey',
+          message: 'OpenRouter API key',
+          validate: (value: string) =>
+            value.trim().length > 0 ? true : 'API key is required.',
+        },
+        promptOptions,
+      );
+      globalApiKey = String(apiKey || '').trim();
+    }
+  } else {
+    const { apiKey } = await prompts(
+      {
+        type: 'password',
+        name: 'apiKey',
+        message: 'OpenRouter API key',
+        validate: (value: string) =>
+          value.trim().length > 0 ? true : 'API key is required.',
+      },
+      promptOptions,
+    );
+    globalApiKey = String(apiKey || '').trim();
+  }
+
+  const projectConfig: ProjectConfig = {
     model: String(model || DEFAULT_MODEL).trim(),
     format: String(format || 'custom'),
     instructions: instructions.trim(),
@@ -211,16 +261,11 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
         : DEFAULT_MAX_TOKENS,
   };
 
-  await saveConfig(resolvedConfigPath, config);
+  const updatedConfig = upsertProjectConfig(existingConfig, repoRoot, projectConfig);
+  updatedConfig.openrouterApiKey = globalApiKey;
 
-  const addedToGitignore = await ensureGitignoreEntry(
-    repoRoot,
-    resolvedConfigPath,
-  );
+  await saveGlobalConfig(resolvedConfigPath, updatedConfig);
 
-  const relative = path.relative(repoRoot, resolvedConfigPath) || CONFIG_FILENAME;
-  console.log(`Config saved to ${relative}`);
-  if (addedToGitignore) {
-    console.log(`Added ${relative} to .gitignore`);
-  }
+  console.log(`Config saved to ${resolvedConfigPath}`);
+  console.log(`Linked to repo ${repoRoot}`);
 }

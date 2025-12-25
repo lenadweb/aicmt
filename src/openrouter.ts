@@ -139,7 +139,6 @@ export interface GenerateCommitMessagesInput {
   model: string;
   instructions: string;
   diff: string;
-  stagedFiles: string[];
   temperature: number;
   maxTokens: number;
   onDebug?: (info: OpenRouterDebugInfo) => void;
@@ -158,7 +157,6 @@ export async function generateCommitMessages({
   model,
   instructions,
   diff,
-  stagedFiles,
   temperature,
   maxTokens,
   onDebug,
@@ -167,11 +165,9 @@ export async function generateCommitMessages({
   const diffText = trimmedDiff
     ? compressLargeNewFiles(trimmedDiff)
     : '[No diff available]';
-  const fileList = stagedFiles.length
-    ? stagedFiles.map((file) => `- ${file}`).join('\n')
-    : '- (no files detected)';
 
-  const prompt = [
+  const systemContent = [
+    'You generate git commit messages for staged changes.',
     'Return ONLY a JSON array of exactly 3 strings.',
     'Each string must be a commit message that matches the instructions.',
     'Each option must summarize the full set of changes in this diff as a single commit.',
@@ -179,20 +175,15 @@ export async function generateCommitMessages({
     '',
     'Instructions:',
     instructions,
-    '',
-    'Staged files:',
-    fileList,
-    '',
-    'Staged diff:',
-    diffText,
   ].join('\n');
+  const prompt = diffText;
 
   const payload: Record<string, unknown> = {
     model,
     messages: [
       {
         role: 'system',
-        content: 'You generate git commit messages for staged changes.',
+        content: systemContent,
       },
       { role: 'user', content: prompt },
     ],

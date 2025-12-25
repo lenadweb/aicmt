@@ -1,10 +1,9 @@
 import prompts from 'prompts';
-import { loadConfig, resolveConfigPath } from '../config';
+import { loadGlobalConfig, resolveConfigPath, resolveProjectConfig } from '../config';
 import {
   commitWithMessage,
   getRepoRoot,
   getStagedDiff,
-  getStagedFiles,
   getStatus,
   isGitRepo,
   stageAll,
@@ -37,7 +36,8 @@ export async function runCommit({
 
   const repoRoot = await getRepoRoot(cwd);
   const resolvedConfigPath = resolveConfigPath(repoRoot, configPath);
-  const config = await loadConfig(resolvedConfigPath);
+  const globalConfig = await loadGlobalConfig(resolvedConfigPath);
+  const config = resolveProjectConfig(globalConfig, repoRoot);
 
   let status = await getStatus(repoRoot);
   if (status.staged.length === 0 && status.unstaged.length === 0) {
@@ -67,7 +67,6 @@ export async function runCommit({
     throw new Error('No staged changes to commit.');
   }
 
-  const stagedFiles = await getStagedFiles(repoRoot);
   const diff = await getStagedDiff(repoRoot);
 
   const debugInfo: {
@@ -80,7 +79,6 @@ export async function runCommit({
     model: config.model,
     instructions: config.instructions,
     diff,
-    stagedFiles,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
     onDebug: (info) => {

@@ -27,7 +27,12 @@ npm run build
 node dist/bin/ai-committer.js init
 ```
 
-This creates `ai-committer.json` in the repository root and adds it to `.gitignore`.
+This writes to the global config file:
+
+- `$XDG_CONFIG_HOME/ai-committer/config.json`
+- `~/.config/ai-committer/config.json` (fallback)
+
+Each repository gets its own entry inside the global config.
 
 ## Usage
 
@@ -43,7 +48,7 @@ If any unstaged changes exist, the tool requires staging them before generating 
 
 ### Options
 
-- `--config <path>`: Use a custom config file path.
+- `--config <path>`: Use a custom global config file path.
 - `--dry-run`: Show the chosen message without committing.
 - `--verbose`: Print AI request and response logs.
 
@@ -54,15 +59,20 @@ Example:
 ```json
 {
   "openrouterApiKey": "sk-...",
-  "model": "openai/gpt-4o-mini",
-  "format": "conventional",
-  "instructions": "Write in Russian. Imperative mood. No trailing periods.",
-  "temperature": 0.2,
-  "maxTokens": 120
+  "projects": {
+    "/path/to/repo": {
+      "model": "openai/gpt-4o-mini",
+      "format": "conventional",
+      "instructions": "Write in Russian. Imperative mood. No trailing periods.",
+      "temperature": 0.2,
+      "maxTokens": 120
+    }
+  }
 }
 ```
 
 ## Notes
 
-- The config contains your API key. Keep it out of version control.
+- The global config contains your API key. Keep it private.
 - The tool uses the staged diff to generate commit messages.
+- `maxTokens` is clamped between 32 and 512 to avoid excessive output.
