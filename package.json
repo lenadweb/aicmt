@@ -28,8 +28,8 @@
     "commit": "node dist/bin/aicmt.js commit"
   },
   "engines": {
-    "node": ">=18",
-    "npm": ">=9"
+    "node": ">=16.17",
+    "npm": ">=8"
   },
   "keywords": [
     "git",
@@ -43,6 +43,7 @@
   "dependencies": {
     "commander": "^12.1.0",
     "prompts": "^2.4.2",
+    "undici": "^5.28.4",
     "zod": "^3.23.8"
   },
   "devDependencies": {

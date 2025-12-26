@@ -19,7 +19,7 @@ AI-assisted git commits via OpenRouter. Designed for fast, consistent commit mes
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 16+
 - Git
 
 ## Install (local dev)

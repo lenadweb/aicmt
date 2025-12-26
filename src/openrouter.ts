@@ -1,3 +1,5 @@
+import { fetch } from 'undici';
+
 interface OpenRouterResponse {
   choices?: Array<{
     message?: {
