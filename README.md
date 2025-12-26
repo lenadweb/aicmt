@@ -22,15 +22,17 @@ AI-assisted git commits via OpenRouter. Designed for fast, consistent commit mes
 - Node.js 16+
 - Git
 
-## Install (local dev)
+## Install
 
 ```
-npm install
-npm run build
-npm link
+npm install -g @lenadweb/aicmt
 ```
 
-After linking, the `aicmt` command is available globally.
+Or run without installing:
+
+```
+npx @lenadweb/aicmt
+```
 
 ## Global config
 
@@ -111,6 +113,16 @@ Notes:
 - `No config found for this repo` or `Missing ...`: run `aicmt init` to set global defaults or a repo override.
 - `OpenRouter error 400`: your output tokens are too high or diff is too large. Lower `maxTokens` or reduce the staged diff.
 - `Not a git repository`: run inside a git repo.
+
+## Local development
+
+```
+npm install
+npm run build
+npm link
+```
+
+After linking, the `aicmt` command is available globally.
 
 ## Development
 
