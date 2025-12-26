@@ -1,6 +1,17 @@
+import { access } from 'node:fs/promises';
 import { Command } from 'commander';
+import { resolveConfigPath } from './config';
 import { runCommit } from './commands/commit';
 import { runInit } from './commands/init';
+
+async function configExists(configPath: string): Promise<boolean> {
+  try {
+    await access(configPath);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
 
 export async function run(argv: string[] = process.argv): Promise<void> {
   const program = new Command();
@@ -41,6 +52,14 @@ export async function run(argv: string[] = process.argv): Promise<void> {
       });
     },
     );
+
+  if (argv.length <= 2) {
+    const configPath = resolveConfigPath(process.cwd());
+    if (!(await configExists(configPath))) {
+      await runInit({ cwd: process.cwd() });
+      return;
+    }
+  }
 
   await program.parseAsync(argv);
 }

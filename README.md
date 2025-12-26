@@ -58,7 +58,7 @@ You will choose:
 
 ## Usage
 
-Default command runs `commit`:
+Default command runs `commit` (or `init` if no global config exists yet):
 
 ```
 aicmt
