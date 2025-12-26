@@ -52,6 +52,7 @@ If any unstaged changes exist, the tool requires staging them before generating 
 - `--config <path>`: Use a custom global config file path.
 - `--dry-run`: Show the chosen message without committing.
 - `--verbose`: Print AI request and response logs.
+- `-y, --yes`: Skip prompts (stage all changes, pick first message, auto-confirm).
 
 ## Config format
 

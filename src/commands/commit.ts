@@ -21,6 +21,7 @@ export interface CommitOptions {
   configPath?: string;
   dryRun?: boolean;
   verbose?: boolean;
+  yes?: boolean;
 }
 
 export async function runCommit({
@@ -28,6 +29,7 @@ export async function runCommit({
   configPath,
   dryRun = false,
   verbose = false,
+  yes = false,
 }: CommitOptions): Promise<void> {
   const isRepo = await isGitRepo(cwd);
   if (!isRepo) {
@@ -45,21 +47,25 @@ export async function runCommit({
   }
 
   if (status.unstaged.length > 0) {
-    const { stage } = await prompts(
-      {
-        type: 'confirm',
-        name: 'stage',
-        message: 'Unstaged changes detected. Stage all changes?',
-        initial: true,
-      },
-      promptOptions,
-    );
+    if (yes) {
+      await stageAll(repoRoot);
+    } else {
+      const { stage } = await prompts(
+        {
+          type: 'confirm',
+          name: 'stage',
+          message: 'Unstaged changes detected. Stage all changes?',
+          initial: true,
+        },
+        promptOptions,
+      );
 
-    if (!stage) {
-      throw new Error('Aborted: commit requires all changes to be staged.');
+      if (!stage) {
+        throw new Error('Aborted: commit requires all changes to be staged.');
+      }
+
+      await stageAll(repoRoot);
     }
-
-    await stageAll(repoRoot);
     status = await getStatus(repoRoot);
   }
 
@@ -105,63 +111,69 @@ export async function runCommit({
     }
   }
 
-  const choicePrompt = await prompts(
-    {
-      type: 'select',
-      name: 'selection',
-      message: 'Choose a commit message',
-      choices: [
-        ...messages.map((message, index) => ({
-          title: message,
-          value: message,
-          description: `Option ${index + 1}`,
-        })),
-        { title: 'Custom message', value: '__custom', description: 'Write your own' },
-        { title: 'Abort', value: '__abort', description: 'Cancel commit' },
-      ],
-    },
-    promptOptions,
-  );
+  let finalMessage = messages[0] ?? '';
 
-  if (!choicePrompt.selection || choicePrompt.selection === '__abort') {
-    console.log('Commit cancelled.');
-    return;
-  }
-
-  let finalMessage = String(choicePrompt.selection);
-
-  if (choicePrompt.selection === '__custom') {
-    const { customMessage } = await prompts(
+  if (!yes) {
+    const choicePrompt = await prompts(
       {
-        type: 'text',
-        name: 'customMessage',
-        message: 'Enter commit message',
-        validate: (value: string) =>
-          value.trim().length > 0 ? true : 'Commit message is required.',
+        type: 'select',
+        name: 'selection',
+        message: 'Choose a commit message',
+        choices: [
+          ...messages.map((message, index) => ({
+            title: message,
+            value: message,
+            description: `Option ${index + 1}`,
+          })),
+          { title: 'Custom message', value: '__custom', description: 'Write your own' },
+          { title: 'Abort', value: '__abort', description: 'Cancel commit' },
+        ],
       },
       promptOptions,
     );
 
-    finalMessage = String(customMessage || '').trim();
+    if (!choicePrompt.selection || choicePrompt.selection === '__abort') {
+      console.log('Commit cancelled.');
+      return;
+    }
+
+    finalMessage = String(choicePrompt.selection);
+
+    if (choicePrompt.selection === '__custom') {
+      const { customMessage } = await prompts(
+        {
+          type: 'text',
+          name: 'customMessage',
+          message: 'Enter commit message',
+          validate: (value: string) =>
+            value.trim().length > 0 ? true : 'Commit message is required.',
+        },
+        promptOptions,
+      );
+
+      finalMessage = String(customMessage || '').trim();
+    }
   }
 
   if (!finalMessage) {
     throw new Error('Commit message is empty.');
   }
 
-  const { confirm } = await prompts(
-    {
-      type: 'confirm',
-      name: 'confirm',
-      message: `Commit with message:\n${finalMessage}\nProceed?`,
-      initial: true,
-    },
-    promptOptions,
-  );
+  if (!yes) {
+    const { confirm } = await prompts(
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: `Commit with message:\n${finalMessage}\nProceed?`,
+        initial: true,
+      },
+      promptOptions,
+    );
 
-  if (!confirm) {
-    console.log('Commit cancelled.');
-    return;
+    if (!confirm) {
+      console.log('Commit cancelled.');
+      return;
+    }
   }
 
   if (dryRun) {

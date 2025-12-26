@@ -24,14 +24,23 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .option('-c, --config <path>', 'Path to global config file')
     .option('--dry-run', 'Show the chosen message without committing', false)
     .option('-v, --verbose', 'Show AI request and response logs', false)
-    .action(async (options: { config?: string; dryRun?: boolean; verbose?: boolean }) => {
+    .option('-y, --yes', 'Skip prompts: stage all, pick first message', false)
+    .action(
+      async (options: {
+        config?: string;
+        dryRun?: boolean;
+        verbose?: boolean;
+        yes?: boolean;
+      }) => {
       await runCommit({
         cwd: process.cwd(),
         configPath: options.config,
         dryRun: Boolean(options.dryRun),
         verbose: Boolean(options.verbose),
+        yes: Boolean(options.yes),
       });
-    });
+    },
+    );
 
   await program.parseAsync(argv);
 }
