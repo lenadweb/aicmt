@@ -9,6 +9,14 @@ AI-assisted git commits via OpenRouter. Designed for fast, consistent commit mes
 - Can auto-stage and auto-commit with `-y`
 - Logs AI request/response with `--verbose` for troubleshooting
 
+## How it works
+
+- Collects staged diff; if unstaged files exist, it can stage all changes
+- Builds a minimal prompt: system instructions + raw diff
+- Requests 3 commit message options from OpenRouter
+- Lets you pick (or auto-picks the first with `-y`)
+- Creates the git commit with the chosen message
+
 ## Requirements
 
 - Node.js 18+
