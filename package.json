@@ -1,11 +1,26 @@
 {
   "name": "aicmt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-assisted git commits via OpenRouter",
   "main": "dist/cli.js",
+  "author": "lenadweb",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lenadweb/aicmt.git"
+  },
+  "homepage": "https://github.com/lenadweb/aicmt#readme",
+  "bugs": {
+    "url": "https://github.com/lenadweb/aicmt/issues"
+  },
   "bin": {
     "aicmt": "dist/bin/aicmt.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup",
     "start": "node dist/bin/aicmt.js",
@@ -13,16 +28,18 @@
     "commit": "node dist/bin/aicmt.js commit"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18",
+    "npm": ">=9"
   },
   "keywords": [
     "git",
     "commit",
+    "commit-message",
     "cli",
     "openrouter",
-    "ai"
+    "ai",
+    "aicmt"
   ],
-  "private": true,
   "dependencies": {
     "commander": "^12.1.0",
     "prompts": "^2.4.2",
