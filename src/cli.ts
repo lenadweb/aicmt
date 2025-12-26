@@ -19,7 +19,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     });
 
   program
-    .command('commit')
+    .command('commit', { isDefault: true })
     .description('Generate and create a commit for staged changes')
     .option('-c, --config <path>', 'Path to global config file')
     .option('--dry-run', 'Show the chosen message without committing', false)

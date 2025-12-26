@@ -40,6 +40,12 @@ Global settings apply to all repositories; per-repo overrides live in `projects`
 Generate a commit message for staged changes:
 
 ```
+node dist/bin/aicmt.js
+```
+
+You can also use the explicit command:
+
+```
 node dist/bin/aicmt.js commit
 ```
 
