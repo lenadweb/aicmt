@@ -182,5 +182,5 @@ export async function runCommit({
   }
 
   await commitWithMessage(repoRoot, finalMessage);
-  console.log('Commit created.');
+  console.log(`Commit created: ${finalMessage}`);
 }
