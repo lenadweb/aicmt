@@ -97,7 +97,7 @@ export async function commitWithMessage(repoRoot: string, message: string): Prom
     return;
   }
 
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-committer-'));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aicmt-'));
   const tempPath = path.join(tempDir, 'commit-message.txt');
   await fs.writeFile(tempPath, message, 'utf8');
   try {

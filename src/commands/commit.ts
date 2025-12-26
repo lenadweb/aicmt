@@ -92,15 +92,15 @@ export async function runCommit({
 
   if (verbose) {
     if (debugInfo.request) {
-      console.log('[ai-committer] AI request payload:');
+      console.log('[aicmt] AI request payload:');
       console.log(JSON.stringify(debugInfo.request.payload, null, 2));
-      console.log('[ai-committer] AI request prompt:');
+      console.log('[aicmt] AI request prompt:');
       console.log(debugInfo.request.prompt);
     }
 
     if (debugInfo.response) {
       const status = debugInfo.response.status ?? 'unknown';
-      console.log(`[ai-committer] AI response (status ${status}):`);
+      console.log(`[aicmt] AI response (status ${status}):`);
       console.log(debugInfo.response.responseText ?? '');
     }
   }

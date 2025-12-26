@@ -1,4 +1,4 @@
-# ai-committer
+# aicmt
 
 AI-assisted git commits via OpenRouter.
 
@@ -24,13 +24,13 @@ npm run build
 3. Initialize config
 
 ```
-node dist/bin/ai-committer.js init
+node dist/bin/aicmt.js init
 ```
 
 This writes to the global config file:
 
-- `$XDG_CONFIG_HOME/ai-committer/config.json`
-- `~/.config/ai-committer/config.json` (fallback)
+- `$XDG_CONFIG_HOME/aicmt/config.json`
+- `~/.config/aicmt/config.json` (fallback)
 
 Each repository gets its own entry inside the global config.
 
@@ -39,7 +39,7 @@ Each repository gets its own entry inside the global config.
 Generate a commit message for staged changes:
 
 ```
-node dist/bin/ai-committer.js commit
+node dist/bin/aicmt.js commit
 ```
 
 If there are no staged changes, you will be asked to stage all changes.

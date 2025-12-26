@@ -6,13 +6,13 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   const program = new Command();
 
   program
-    .name('ai-committer')
+    .name('aicmt')
     .description('AI-assisted git commits via OpenRouter')
     .version('0.1.0');
 
   program
     .command('init')
-    .description('Initialize ai-committer in this repository')
+    .description('Initialize aicmt in this repository')
     .option('-c, --config <path>', 'Path to global config file')
     .action(async (options: { config?: string }) => {
       await runInit({ cwd: process.cwd(), configPath: options.config });

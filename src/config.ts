@@ -105,12 +105,12 @@ export function resolveProjectConfig(
 ): ResolvedConfig {
   const projectConfig = globalConfig.projects?.[repoRoot];
   if (!projectConfig) {
-    throw new Error('No config found for this repo. Run ai-committer init.');
+    throw new Error('No config found for this repo. Run aicmt init.');
   }
 
   const apiKey = projectConfig.openrouterApiKey ?? globalConfig.openrouterApiKey;
   if (!apiKey) {
-    throw new Error('OpenRouter API key missing. Run ai-committer init.');
+    throw new Error('OpenRouter API key missing. Run aicmt init.');
   }
 
   return applyDefaults({ ...projectConfig, openrouterApiKey: apiKey });

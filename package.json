@@ -1,16 +1,16 @@
 {
-  "name": "ai-committer",
+  "name": "aicmt",
   "version": "0.1.0",
   "description": "AI-assisted git commits via OpenRouter",
   "main": "dist/cli.js",
   "bin": {
-    "ai-committer": "dist/bin/ai-committer.js"
+    "aicmt": "dist/bin/aicmt.js"
   },
   "scripts": {
     "build": "tsup",
-    "start": "node dist/bin/ai-committer.js",
-    "init": "node dist/bin/ai-committer.js init",
-    "commit": "node dist/bin/ai-committer.js commit"
+    "start": "node dist/bin/aicmt.js",
+    "init": "node dist/bin/aicmt.js init",
+    "commit": "node dist/bin/aicmt.js commit"
   },
   "engines": {
     "node": ">=18"

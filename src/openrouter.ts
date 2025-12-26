@@ -204,8 +204,8 @@ export async function generateCommitMessages({
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://ai-committer.local',
-      'X-Title': 'ai-committer',
+      'HTTP-Referer': 'https://aicmt.local',
+      'X-Title': 'aicmt',
     },
     body: JSON.stringify(payload),
   });
