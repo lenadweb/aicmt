@@ -11,26 +11,28 @@ import {
   MIN_OUTPUT_TOKENS,
 } from './constants';
 
-const projectConfigSchema = z
+const sharedConfigSchema = z
   .object({
-    model: z.string().min(1),
-    format: z.string().min(1),
-    instructions: z.string().min(1),
+    openrouterApiKey: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    format: z.string().min(1).optional(),
+    instructions: z.string().min(1).optional(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().int().positive().optional(),
-    openrouterApiKey: z.string().min(1).optional(),
   })
   .strict();
 
-export const globalConfigSchema = z
-  .object({
-    openrouterApiKey: z.string().min(1).optional(),
+const projectConfigSchema = sharedConfigSchema;
+
+export const globalConfigSchema = sharedConfigSchema
+  .extend({
     projects: z.record(projectConfigSchema).default({}),
   })
   .strict();
 
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type GlobalConfig = z.infer<typeof globalConfigSchema>;
+export type GlobalDefaults = Omit<GlobalConfig, 'projects'>;
 
 export interface ResolvedConfig {
   openrouterApiKey: string;
@@ -103,17 +105,38 @@ export function resolveProjectConfig(
   globalConfig: GlobalConfig,
   repoRoot: string,
 ): ResolvedConfig {
-  const projectConfig = globalConfig.projects?.[repoRoot];
-  if (!projectConfig) {
-    throw new Error('No config found for this repo. Run aicmt init.');
+  const { projects = {}, ...defaults } = globalConfig;
+  const projectConfig = projects[repoRoot] ?? {};
+  const merged = { ...defaults, ...projectConfig };
+
+  const missing: string[] = [];
+  if (!merged.openrouterApiKey) {
+    missing.push('openrouterApiKey');
+  }
+  if (!merged.model) {
+    missing.push('model');
+  }
+  if (!merged.format) {
+    missing.push('format');
+  }
+  if (!merged.instructions) {
+    missing.push('instructions');
   }
 
-  const apiKey = projectConfig.openrouterApiKey ?? globalConfig.openrouterApiKey;
-  if (!apiKey) {
-    throw new Error('OpenRouter API key missing. Run aicmt init.');
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing ${missing.join(', ')} in config. Run aicmt init to set defaults.`,
+    );
   }
 
-  return applyDefaults({ ...projectConfig, openrouterApiKey: apiKey });
+  return applyDefaults({
+    openrouterApiKey: merged.openrouterApiKey,
+    model: merged.model,
+    format: merged.format,
+    instructions: merged.instructions,
+    temperature: merged.temperature,
+    maxTokens: merged.maxTokens,
+  });
 }
 
 export async function loadGlobalConfig(
@@ -125,7 +148,7 @@ export async function loadGlobalConfig(
     raw = await fs.readFile(configPath, 'utf8');
   } catch (error) {
     if (options.allowMissing) {
-      return globalConfigSchema.parse({ projects: {} });
+      return globalConfigSchema.parse({});
     }
     throw new Error(`Global config not found at ${configPath}`);
   }

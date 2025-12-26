@@ -79,18 +79,14 @@ export interface InitOptions {
   configPath?: string;
 }
 
-function upsertProjectConfig(
-  globalConfig: GlobalConfig,
-  repoRoot: string,
-  projectConfig: ProjectConfig,
-): GlobalConfig {
-  return {
-    ...globalConfig,
-    projects: {
-      ...globalConfig.projects,
-      [repoRoot]: projectConfig,
-    },
-  };
+function hasGlobalDefaults(config: GlobalConfig): boolean {
+  return Boolean(
+    config.model ||
+      config.format ||
+      config.instructions ||
+      typeof config.temperature === 'number' ||
+      typeof config.maxTokens === 'number',
+  );
 }
 
 export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
@@ -105,23 +101,6 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
   const existingConfig = await loadGlobalConfig(resolvedConfigPath, {
     allowMissing: true,
   });
-
-  if (existingConfig.projects?.[repoRoot]) {
-    const { overwrite } = await prompts(
-      {
-        type: 'confirm',
-        name: 'overwrite',
-        message: 'Config already exists for this repo. Overwrite?',
-        initial: false,
-      },
-      promptOptions,
-    );
-
-    if (!overwrite) {
-      console.log('Init cancelled.');
-      return;
-    }
-  }
 
   const { format } = await prompts(
     {
@@ -208,6 +187,64 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     promptOptions,
   );
 
+  const { scope } = await prompts(
+    {
+      type: 'select',
+      name: 'scope',
+      message: 'Apply settings to',
+      choices: [
+        {
+          title: 'All projects (global defaults)',
+          value: 'global',
+          description: 'Used when a repo has no override',
+        },
+        {
+          title: 'This repo only (override)',
+          value: 'project',
+          description: 'Use custom settings for this repository',
+        },
+      ],
+      initial: 0,
+    },
+    promptOptions,
+  );
+
+  const targetScope = scope === 'project' ? 'project' : 'global';
+
+  if (targetScope === 'global' && hasGlobalDefaults(existingConfig)) {
+    const { overwrite } = await prompts(
+      {
+        type: 'confirm',
+        name: 'overwrite',
+        message: 'Global defaults already exist. Overwrite?',
+        initial: false,
+      },
+      promptOptions,
+    );
+
+    if (!overwrite) {
+      console.log('Init cancelled.');
+      return;
+    }
+  }
+
+  if (targetScope === 'project' && existingConfig.projects?.[repoRoot]) {
+    const { overwrite } = await prompts(
+      {
+        type: 'confirm',
+        name: 'overwrite',
+        message: 'Config already exists for this repo. Overwrite?',
+        initial: false,
+      },
+      promptOptions,
+    );
+
+    if (!overwrite) {
+      console.log('Init cancelled.');
+      return;
+    }
+  }
+
   let globalApiKey = existingConfig.openrouterApiKey ?? '';
   if (globalApiKey) {
     const { reuseKey } = await prompts(
@@ -261,11 +298,31 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
         : DEFAULT_MAX_TOKENS,
   };
 
-  const updatedConfig = upsertProjectConfig(existingConfig, repoRoot, projectConfig);
+  const updatedConfig: GlobalConfig = {
+    ...existingConfig,
+    projects: {
+      ...(existingConfig.projects ?? {}),
+    },
+  };
+
   updatedConfig.openrouterApiKey = globalApiKey;
+
+  if (targetScope === 'global') {
+    updatedConfig.model = projectConfig.model;
+    updatedConfig.format = projectConfig.format;
+    updatedConfig.instructions = projectConfig.instructions;
+    updatedConfig.temperature = projectConfig.temperature;
+    updatedConfig.maxTokens = projectConfig.maxTokens;
+  } else {
+    updatedConfig.projects[repoRoot] = projectConfig;
+  }
 
   await saveGlobalConfig(resolvedConfigPath, updatedConfig);
 
   console.log(`Config saved to ${resolvedConfigPath}`);
-  console.log(`Linked to repo ${repoRoot}`);
+  if (targetScope === 'global') {
+    console.log('Applied as global defaults for all projects.');
+  } else {
+    console.log(`Applied as override for ${repoRoot}.`);
+  }
 }

@@ -32,7 +32,8 @@ This writes to the global config file:
 - `$XDG_CONFIG_HOME/aicmt/config.json`
 - `~/.config/aicmt/config.json` (fallback)
 
-Each repository gets its own entry inside the global config.
+Init lets you choose global defaults or a per-repo override.
+Global settings apply to all repositories; per-repo overrides live in `projects`.
 
 ## Usage
 
@@ -59,13 +60,15 @@ Example:
 ```json
 {
   "openrouterApiKey": "sk-...",
+  "model": "openai/gpt-4o-mini",
+  "format": "conventional",
+  "instructions": "Write in Russian. Imperative mood. No trailing periods.",
+  "temperature": 0.2,
+  "maxTokens": 120,
   "projects": {
     "/path/to/repo": {
-      "model": "openai/gpt-4o-mini",
-      "format": "conventional",
-      "instructions": "Write in Russian. Imperative mood. No trailing periods.",
-      "temperature": 0.2,
-      "maxTokens": 120
+      "instructions": "Use Conventional Commits with scope.",
+      "format": "conventional-scope"
     }
   }
 }
@@ -76,3 +79,4 @@ Example:
 - The global config contains your API key. Keep it private.
 - The tool uses the staged diff to generate commit messages.
 - `maxTokens` is clamped between 32 and 512 to avoid excessive output.
+- If a repo has no override, global defaults are used.
