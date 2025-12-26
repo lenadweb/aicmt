@@ -1,89 +1,115 @@
 # aicmt
 
-AI-assisted git commits via OpenRouter.
+AI-assisted git commits via OpenRouter. Designed for fast, consistent commit messages with minimal prompts.
+
+## What it does
+
+- Generates 3 commit message options from the staged diff
+- Supports global defaults with per-repo overrides
+- Can auto-stage and auto-commit with `-y`
+- Logs AI request/response with `--verbose` for troubleshooting
 
 ## Requirements
 
 - Node.js 18+
 - Git
 
-## Setup
-
-1. Install dependencies
+## Install (local dev)
 
 ```
 npm install
-```
-
-2. Build
-
-```
 npm run build
+npm link
 ```
 
-3. Initialize config
+After linking, the `aicmt` command is available globally.
 
-```
-node dist/bin/aicmt.js init
-```
+## Global config
 
-This writes to the global config file:
+The global config file lives at:
 
 - `$XDG_CONFIG_HOME/aicmt/config.json`
 - `~/.config/aicmt/config.json` (fallback)
 
-Init lets you choose global defaults or a per-repo override.
-Global settings apply to all repositories; per-repo overrides live in `projects`.
+Global defaults apply to all repos. Per-repo overrides live under `projects`.
+
+## Init (interactive)
+
+Run init inside a git repo:
+
+```
+aicmt init
+```
+
+You will choose:
+
+- Commit format (preset or custom)
+- Additional instructions
+- Model, temperature, max tokens
+- Scope (global defaults or repo override)
 
 ## Usage
 
-Generate a commit message for staged changes:
+Default command runs `commit`:
 
 ```
-node dist/bin/aicmt.js
+aicmt
 ```
 
-You can also use the explicit command:
+Explicit form:
 
 ```
-node dist/bin/aicmt.js commit
+aicmt commit
 ```
 
-If there are no staged changes, you will be asked to stage all changes.
-The tool will propose 3 commit messages, then ask for confirmation.
-If any unstaged changes exist, the tool requires staging them before generating messages.
+If there are unstaged changes, aicmt will ask to stage them. It always commits all changes that are staged.
 
-### Options
+## Flags
 
-- `--config <path>`: Use a custom global config file path.
-- `--dry-run`: Show the chosen message without committing.
-- `--verbose`: Print AI request and response logs.
-- `-y, --yes`: Skip prompts (stage all changes, pick first message, auto-confirm).
+- `-c, --config <path>`: Custom global config path
+- `--dry-run`: Show the chosen message without committing
+- `-v, --verbose`: Print AI request and response logs
+- `-y, --yes`: Skip prompts (stage all, pick first message, auto-confirm)
 
 ## Config format
 
-Example:
+Example global config with repo override:
 
 ```json
 {
   "openrouterApiKey": "sk-...",
   "model": "openai/gpt-4o-mini",
   "format": "conventional",
-  "instructions": "Write in Russian. Imperative mood. No trailing periods.",
+  "instructions": "Generate a short conventional-lite commit message:\n\nlowercase only\nno period, no emoji\nimperative verb (add / fix / update / remove / improve)\n3-7 words\ndescribe what was done, not why\n\nExamples:\nadd smart preview toggler\nfix expand text for smart preview\nremove custom font family\n\nContext:\n<brief description of code changes>\n\nReturn only one commit message.",
   "temperature": 0.2,
   "maxTokens": 120,
   "projects": {
     "/path/to/repo": {
-      "instructions": "Use Conventional Commits with scope.",
-      "format": "conventional-scope"
+      "format": "conventional-scope",
+      "instructions": "Use Conventional Commits with scope."
     }
   }
 }
 ```
 
-## Notes
+Notes:
 
-- The global config contains your API key. Keep it private.
-- The tool uses the staged diff to generate commit messages.
-- `maxTokens` is clamped between 32 and 512 to avoid excessive output.
+- `maxTokens` is clamped between 32 and 512 to prevent excessive output.
 - If a repo has no override, global defaults are used.
+- Keep the global config private (it contains your API key).
+
+## Troubleshooting
+
+- `No config found for this repo` or `Missing ...`: run `aicmt init` to set global defaults or a repo override.
+- `OpenRouter error 400`: your output tokens are too high or diff is too large. Lower `maxTokens` or reduce the staged diff.
+- `Not a git repository`: run inside a git repo.
+
+## Development
+
+```
+npm run build
+```
+
+Entry point:
+
+- `src/bin/aicmt.ts`
