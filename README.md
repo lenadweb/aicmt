@@ -5,6 +5,7 @@ AI-assisted git commits via OpenRouter. Designed for fast, consistent commit mes
 ## What it does
 
 - Generates 3 commit message options from the staged diff
+- Splits changes into multiple logical commits with `--split`
 - Supports global defaults with per-repo overrides
 - Can auto-stage and auto-commit with `-y`
 - Logs AI request/response with `--verbose` for troubleshooting
@@ -80,6 +81,42 @@ If there are unstaged changes, aicmt will ask to stage them. It always commits a
 - `--dry-run`: Show the chosen message without committing
 - `-v, --verbose`: Print AI request and response logs
 - `-y, --yes`: Skip prompts (stage all, pick first message, auto-confirm)
+- `-s, --split`: Split changes into multiple logical commits
+
+## Split mode
+
+When you have multiple unrelated changes, use `--split` to automatically decompose them into separate commits:
+
+```
+aicmt commit --split
+```
+
+The AI analyzes your diff and groups files by logical changes:
+
+```
+Analyzing 5 changed files...
+
+Proposed 3 commits:
+
+  1. feat: add user authentication
+    - src/auth.ts
+    - src/middleware/auth.ts
+
+  2. fix: correct validation logic
+    - src/validators.ts
+
+  3. docs: update API documentation
+    - README.md
+    - docs/api.md
+
+Proceed with these 3 commits? (Y/n)
+```
+
+Split mode works with other flags:
+
+- `--split --dry-run`: Preview proposed commits without creating them
+- `--split -y`: Auto-confirm all commits
+- `--split -v`: Show AI request/response for debugging
 
 ## Config format
 
