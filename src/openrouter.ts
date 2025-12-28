@@ -151,12 +151,34 @@ export interface CommitGroup {
   message: string;
 }
 
+export interface HunkCommitGroup {
+  hunkIds: string[];  // e.g., ["file.ts:1", "file.ts:2", "other.ts:1"]
+  message: string;
+}
+
+export interface HunkInfo {
+  id: string;
+  file: string;
+  summary: string;
+}
+
 export interface GenerateCommitGroupsInput {
   apiKey: string;
   model: string;
   instructions: string;
   diff: string;
   files: string[];
+  temperature: number;
+  maxTokens: number;
+  onDebug?: (info: OpenRouterDebugInfo) => void;
+}
+
+export interface GenerateHunkGroupsInput {
+  apiKey: string;
+  model: string;
+  instructions: string;
+  hunks: HunkInfo[];
+  fullDiff: string;
   temperature: number;
   maxTokens: number;
   onDebug?: (info: OpenRouterDebugInfo) => void;
@@ -407,4 +429,164 @@ export async function generateCommitGroups({
   }
 
   return groups;
+}
+
+function parseHunkGroups(text: string): HunkCommitGroup[] | null {
+  const cleaned = stripCodeFences(text);
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+
+    const groups: HunkCommitGroup[] = [];
+    for (const item of parsed) {
+      if (
+        typeof item === 'object' &&
+        item !== null &&
+        Array.isArray(item.hunkIds) &&
+        typeof item.message === 'string' &&
+        item.hunkIds.length > 0 &&
+        item.message.trim().length > 0
+      ) {
+        groups.push({
+          hunkIds: item.hunkIds.filter((id: unknown) => typeof id === 'string'),
+          message: item.message.trim(),
+        });
+      }
+    }
+
+    return groups.length > 0 ? groups : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function generateCommitGroupsFromHunks({
+  apiKey,
+  model,
+  instructions,
+  hunks,
+  fullDiff,
+  temperature,
+  maxTokens,
+  onDebug,
+}: GenerateHunkGroupsInput): Promise<HunkCommitGroup[]> {
+  const trimmedDiff = fullDiff.trim();
+  const diffText = trimmedDiff
+    ? compressLargeNewFiles(trimmedDiff)
+    : '[No diff available]';
+
+  const systemContent = [
+    'You analyze git diffs and group change hunks into logical commits.',
+    'A hunk is a contiguous block of changes within a file. Multiple hunks can exist in one file.',
+    'Your task is to split hunks into commits where each commit represents a single logical unit of work.',
+    '',
+    'Return ONLY a JSON array of objects with this structure:',
+    '[{"hunkIds": ["file.ts:1", "file.ts:2"], "message": "commit message"}, ...]',
+    '',
+    'Rules:',
+    '- Each hunkId should appear in exactly one group',
+    '- Group related changes together even if they are in different files',
+    '- IMPORTANT: If hunks within the same file are related, keep them in the same commit',
+    '- Each commit message must follow the instructions below',
+    '- Order commits logically (dependencies first, then dependent changes)',
+    '- If all changes belong together, return a single group',
+    '- Do not include any extra commentary or markdown',
+    '',
+    'Commit message instructions:',
+    instructions,
+  ].join('\n');
+
+  const hunksList = hunks
+    .map((h) => `- ${h.id} (${h.file}):\n${h.summary.split('\n').map(l => '    ' + l).join('\n')}`)
+    .join('\n');
+
+  const prompt = [
+    'Available hunks:',
+    hunksList,
+    '',
+    'Full diff for context:',
+    diffText,
+  ].join('\n');
+
+  const payload: Record<string, unknown> = {
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: systemContent,
+      },
+      { role: 'user', content: prompt },
+    ],
+  };
+
+  if (typeof temperature === 'number') {
+    payload.temperature = temperature;
+  }
+
+  // Use higher max_tokens for hunk split mode
+  const splitMaxTokens = Math.max(maxTokens * 4, 800);
+  payload.max_tokens = splitMaxTokens;
+
+  onDebug?.({ stage: 'request', prompt, payload });
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://aicmt.local',
+      'X-Title': 'aicmt',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  onDebug?.({
+    stage: 'response',
+    prompt,
+    payload,
+    responseText,
+    status: response.status,
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
+  }
+
+  let data: OpenRouterResponse;
+  try {
+    data = JSON.parse(responseText) as OpenRouterResponse;
+  } catch (error) {
+    throw new Error('OpenRouter returned invalid JSON');
+  }
+  const content = data.choices?.[0]?.message?.content ?? '';
+
+  if (!content) {
+    throw new Error('OpenRouter returned empty content');
+  }
+
+  const groups = parseHunkGroups(content);
+  if (!groups || groups.length === 0) {
+    throw new Error('Failed to parse hunk groups from AI response');
+  }
+
+  // Validate that all hunks are accounted for
+  const allHunkIds = new Set(hunks.map((h) => h.id));
+  const groupedHunkIds = new Set(groups.flatMap((g) => g.hunkIds));
+  const missingHunkIds = [...allHunkIds].filter((id) => !groupedHunkIds.has(id));
+
+  if (missingHunkIds.length > 0) {
+    // Add missing hunks to the last group
+    groups[groups.length - 1].hunkIds.push(...missingHunkIds);
+  }
+
+  // Remove any hunk IDs that don't exist
+  for (const group of groups) {
+    group.hunkIds = group.hunkIds.filter((id) => allHunkIds.has(id));
+  }
+
+  // Filter out empty groups
+  return groups.filter((g) => g.hunkIds.length > 0);
 }
