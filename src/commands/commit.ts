@@ -1,12 +1,18 @@
 import prompts from 'prompts';
 import { loadGlobalConfig, resolveConfigPath, resolveProjectConfig } from '../config';
 import {
+  applyPatch,
+  buildPatchFromHunks,
   commitWithMessage,
+  DiffHunk,
+  getCurrentHead,
   getFullDiff,
   getRepoRoot,
   getStagedDiff,
   getStatus,
   isGitRepo,
+  parseDiffHunks,
+  resetToCommit,
   stageAll,
   stageFiles,
   unstageAll,
@@ -14,7 +20,9 @@ import {
 import {
   CommitGroup,
   generateCommitGroups,
+  generateCommitGroupsFromHunks,
   generateCommitMessages,
+  HunkCommitGroup,
   OpenRouterDebugInfo,
 } from '../openrouter';
 
@@ -31,6 +39,7 @@ export interface CommitOptions {
   verbose?: boolean;
   yes?: boolean;
   split?: boolean;
+  splitHunks?: boolean;
 }
 
 interface SplitCommitOptions {
@@ -170,6 +179,168 @@ async function runSplitCommit({
   console.log(`\nSuccessfully created ${createdCount} commits.`);
 }
 
+function formatHunkGroups(groups: HunkCommitGroup[], hunksMap: Map<string, DiffHunk>): string {
+  return groups
+    .map((group, index) => {
+      const hunkDetails = group.hunkIds.map((id) => {
+        const hunk = hunksMap.get(id);
+        return hunk ? `    - ${id}` : `    - ${id} (unknown)`;
+      }).join('\n');
+      return `  ${index + 1}. ${group.message}\n${hunkDetails}`;
+    })
+    .join('\n\n');
+}
+
+async function runSplitHunksCommit({
+  repoRoot,
+  config,
+  status,
+  dryRun,
+  verbose,
+  yes,
+}: SplitCommitOptions): Promise<void> {
+  // Collect all changed files
+  const allFiles = [...new Set([...status.staged, ...status.unstaged])];
+
+  if (allFiles.length === 0) {
+    throw new Error('No changes to commit.');
+  }
+
+  // Ensure we have a clean staging area
+  if (status.staged.length > 0) {
+    await unstageAll(repoRoot);
+  }
+
+  // Get the full diff and parse into hunks
+  const diff = await getFullDiff(repoRoot);
+  const hunks = parseDiffHunks(diff);
+
+  if (hunks.length === 0) {
+    throw new Error('No hunks found in diff.');
+  }
+
+  // Create a map for quick lookup
+  const hunksMap = new Map<string, DiffHunk>();
+  for (const hunk of hunks) {
+    hunksMap.set(hunk.id, hunk);
+  }
+
+  console.log(`Analyzing ${hunks.length} hunks across ${allFiles.length} files...`);
+  console.log('(experimental hunk-level split mode)\n');
+
+  const debugInfo: {
+    request?: OpenRouterDebugInfo;
+    response?: OpenRouterDebugInfo;
+  } = {};
+
+  // Ask AI to group hunks into logical commits
+  const groups = await generateCommitGroupsFromHunks({
+    apiKey: config.openrouterApiKey,
+    model: config.model,
+    instructions: config.instructions,
+    hunks: hunks.map((h) => ({ id: h.id, file: h.file, summary: h.summary })),
+    fullDiff: diff,
+    temperature: config.temperature,
+    maxTokens: config.maxTokens,
+    onDebug: (info) => {
+      if (info.stage === 'request') {
+        debugInfo.request = info;
+      } else {
+        debugInfo.response = info;
+      }
+    },
+  });
+
+  if (verbose) {
+    if (debugInfo.request) {
+      console.log('[aicmt] AI request payload:');
+      console.log(JSON.stringify(debugInfo.request.payload, null, 2));
+      console.log('[aicmt] AI request prompt:');
+      console.log(debugInfo.request.prompt);
+    }
+
+    if (debugInfo.response) {
+      const responseStatus = debugInfo.response.status ?? 'unknown';
+      console.log(`[aicmt] AI response (status ${responseStatus}):`);
+      console.log(debugInfo.response.responseText ?? '');
+    }
+  }
+
+  console.log(`Proposed ${groups.length} commits:\n`);
+  console.log(formatHunkGroups(groups, hunksMap));
+
+  if (!yes) {
+    const { confirm } = await prompts(
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: `\nProceed with these ${groups.length} commits?`,
+        initial: true,
+      },
+      promptOptions,
+    );
+
+    if (!confirm) {
+      console.log('Split commit cancelled.');
+      return;
+    }
+  }
+
+  if (dryRun) {
+    console.log('\n[dry-run] Would create the following commits:');
+    for (const group of groups) {
+      console.log(`  - ${group.message} (${group.hunkIds.length} hunks)`);
+    }
+    return;
+  }
+
+  // Save current HEAD for potential rollback
+  const originalHead = await getCurrentHead(repoRoot);
+  let createdCount = 0;
+
+  try {
+    for (const group of groups) {
+      // Get hunks for this group
+      const groupHunks = group.hunkIds
+        .map((id) => hunksMap.get(id))
+        .filter((h): h is DiffHunk => h !== undefined);
+
+      if (groupHunks.length === 0) {
+        console.warn(`Warning: No valid hunks for commit "${group.message}", skipping.`);
+        continue;
+      }
+
+      // Build and apply patch
+      const patch = buildPatchFromHunks(groupHunks);
+      await applyPatch(repoRoot, patch);
+
+      // Create commit
+      await commitWithMessage(repoRoot, group.message);
+      createdCount++;
+      console.log(`Commit ${createdCount}/${groups.length}: ${group.message}`);
+    }
+
+    console.log(`\nSuccessfully created ${createdCount} commits.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`\nError during hunk split: ${message}`);
+
+    if (createdCount > 0) {
+      console.error(`Rolling back ${createdCount} commits...`);
+      try {
+        await resetToCommit(repoRoot, originalHead);
+        console.log('Rollback successful. Repository restored to original state.');
+      } catch (rollbackError) {
+        const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : 'Unknown';
+        console.error(`Rollback failed: ${rollbackMsg}`);
+        console.error(`Manual recovery: git reset --mixed ${originalHead}`);
+      }
+    }
+
+    throw error;
+  }
+}
+
 export async function runCommit({
   cwd,
   configPath,
@@ -177,6 +348,7 @@ export async function runCommit({
   verbose = false,
   yes = false,
   split = false,
+  splitHunks = false,
 }: CommitOptions): Promise<void> {
   const isRepo = await isGitRepo(cwd);
   if (!isRepo) {
@@ -193,7 +365,20 @@ export async function runCommit({
     throw new Error('No changes to commit.');
   }
 
-  // Split mode: analyze all changes and create multiple commits
+  // Hunk-level split mode (experimental)
+  if (splitHunks) {
+    await runSplitHunksCommit({
+      repoRoot,
+      config,
+      status,
+      dryRun,
+      verbose,
+      yes,
+    });
+    return;
+  }
+
+  // File-level split mode
   if (split) {
     await runSplitCommit({
       repoRoot,
