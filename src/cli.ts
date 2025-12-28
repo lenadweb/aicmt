@@ -36,7 +36,8 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .option('--dry-run', 'Show the chosen message without committing', false)
     .option('-v, --verbose', 'Show AI request and response logs', false)
     .option('-y, --yes', 'Skip prompts: stage all, pick first message', false)
-    .option('-s, --split', 'Split changes into multiple logical commits', false)
+    .option('-s, --split', 'Split changes into multiple logical commits (file-level)', false)
+    .option('--split-hunks', 'Split changes into multiple commits (hunk-level, experimental)', false)
     .action(
       async (options: {
         config?: string;
@@ -44,6 +45,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         verbose?: boolean;
         yes?: boolean;
         split?: boolean;
+        splitHunks?: boolean;
       }) => {
       await runCommit({
         cwd: process.cwd(),
@@ -52,6 +54,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         verbose: Boolean(options.verbose),
         yes: Boolean(options.yes),
         split: Boolean(options.split),
+        splitHunks: Boolean(options.splitHunks),
       });
     },
     );
