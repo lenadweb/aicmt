@@ -81,7 +81,8 @@ If there are unstaged changes, aicmt will ask to stage them. It always commits a
 - `--dry-run`: Show the chosen message without committing
 - `-v, --verbose`: Print AI request and response logs
 - `-y, --yes`: Skip prompts (stage all, pick first message, auto-confirm)
-- `-s, --split`: Split changes into multiple logical commits
+- `-s, --split`: Split changes into multiple logical commits (file-level)
+- `--split-hunks`: Split changes at hunk level (experimental)
 
 ## Split mode
 
@@ -117,6 +118,37 @@ Split mode works with other flags:
 - `--split --dry-run`: Preview proposed commits without creating them
 - `--split -y`: Auto-confirm all commits
 - `--split -v`: Show AI request/response for debugging
+
+## Hunk-level split (experimental)
+
+For finer control, use `--split-hunks` to split changes within files:
+
+```
+aicmt commit --split-hunks
+```
+
+This mode analyzes individual hunks (contiguous blocks of changes) rather than whole files:
+
+```
+Analyzing 4 hunks across 2 files...
+(experimental hunk-level split mode)
+
+Proposed 2 commits:
+
+  1. fix: correct error handling in auth
+    - src/auth.ts:1
+    - src/auth.ts:2
+
+  2. feat: add logging middleware
+    - src/auth.ts:3
+    - src/middleware.ts:1
+
+Proceed with these 2 commits? (Y/n)
+```
+
+This is useful when a single file contains multiple unrelated changes. If something goes wrong, the tool will automatically rollback all commits.
+
+**Note:** This is experimental. Use `--dry-run` first to preview the proposed split.
 
 ## Config format
 
