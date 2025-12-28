@@ -87,7 +87,8 @@ export async function stageAll(repoRoot: string): Promise<void> {
 }
 
 export async function getStagedDiff(repoRoot: string): Promise<string> {
-  const result = await runGit(['diff', '--cached'], repoRoot);
+  // -U8 shows 8 lines of context (default is 3)
+  const result = await runGit(['diff', '-U8', '--cached'], repoRoot);
   return result.stdout;
 }
 
@@ -101,13 +102,15 @@ export async function unstageAll(repoRoot: string): Promise<void> {
 }
 
 export async function getFullDiff(repoRoot: string): Promise<string> {
-  const result = await runGit(['diff', 'HEAD'], repoRoot);
+  // -U8 shows 8 lines of context (default is 3)
+  const result = await runGit(['diff', '-U8', 'HEAD'], repoRoot);
   return result.stdout;
 }
 
 export async function getDiffForFiles(repoRoot: string, files: string[]): Promise<string> {
   if (files.length === 0) return '';
-  const result = await runGit(['diff', 'HEAD', '--', ...files], repoRoot);
+  // -U8 shows 8 lines of context (default is 3)
+  const result = await runGit(['diff', '-U8', 'HEAD', '--', ...files], repoRoot);
   return result.stdout;
 }
 
