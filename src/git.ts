@@ -117,6 +117,12 @@ export async function getFullDiff(repoRoot: string): Promise<string> {
   return result.stdout;
 }
 
+export async function getFullDiffMinimalContext(repoRoot: string): Promise<string> {
+  // -U1 for more granular hunks (better for hunk-level split)
+  const result = await runGit(['diff', '-U1', 'HEAD'], repoRoot);
+  return result.stdout;
+}
+
 export async function getDiffForFiles(repoRoot: string, files: string[]): Promise<string> {
   if (files.length === 0) return '';
   // -U8 shows 8 lines of context (default is 3)

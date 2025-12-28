@@ -7,6 +7,7 @@ import {
   DiffHunk,
   getCurrentHead,
   getFullDiff,
+  getFullDiffMinimalContext,
   getRepoRoot,
   getStagedDiff,
   getStatus,
@@ -211,9 +212,12 @@ async function runSplitHunksCommit({
     await unstageAll(repoRoot);
   }
 
-  // Get the full diff and parse into hunks
-  const diff = await getFullDiff(repoRoot);
-  const hunks = parseDiffHunks(diff);
+  // Get diff with minimal context for granular hunk detection
+  const diffForHunks = await getFullDiffMinimalContext(repoRoot);
+  const hunks = parseDiffHunks(diffForHunks);
+
+  // Get full diff with more context for AI understanding
+  const fullDiff = await getFullDiff(repoRoot);
 
   if (hunks.length === 0) {
     throw new Error('No hunks found in diff.');
@@ -239,7 +243,7 @@ async function runSplitHunksCommit({
     model: config.model,
     instructions: config.instructions,
     hunks: hunks.map((h) => ({ id: h.id, file: h.file, summary: h.summary })),
-    fullDiff: diff,
+    fullDiff,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
     onDebug: (info) => {
