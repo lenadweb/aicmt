@@ -91,6 +91,26 @@ export async function getStagedDiff(repoRoot: string): Promise<string> {
   return result.stdout;
 }
 
+export async function stageFiles(repoRoot: string, files: string[]): Promise<void> {
+  if (files.length === 0) return;
+  await runGit(['add', '--', ...files], repoRoot);
+}
+
+export async function unstageAll(repoRoot: string): Promise<void> {
+  await runGit(['reset', 'HEAD'], repoRoot);
+}
+
+export async function getFullDiff(repoRoot: string): Promise<string> {
+  const result = await runGit(['diff', 'HEAD'], repoRoot);
+  return result.stdout;
+}
+
+export async function getDiffForFiles(repoRoot: string, files: string[]): Promise<string> {
+  if (files.length === 0) return '';
+  const result = await runGit(['diff', 'HEAD', '--', ...files], repoRoot);
+  return result.stdout;
+}
+
 export async function commitWithMessage(repoRoot: string, message: string): Promise<void> {
   if (!message.includes('\n')) {
     await runGit(['commit', '-m', message], repoRoot);

@@ -36,12 +36,14 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .option('--dry-run', 'Show the chosen message without committing', false)
     .option('-v, --verbose', 'Show AI request and response logs', false)
     .option('-y, --yes', 'Skip prompts: stage all, pick first message', false)
+    .option('-s, --split', 'Split changes into multiple logical commits', false)
     .action(
       async (options: {
         config?: string;
         dryRun?: boolean;
         verbose?: boolean;
         yes?: boolean;
+        split?: boolean;
       }) => {
       await runCommit({
         cwd: process.cwd(),
@@ -49,6 +51,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         dryRun: Boolean(options.dryRun),
         verbose: Boolean(options.verbose),
         yes: Boolean(options.yes),
+        split: Boolean(options.split),
       });
     },
     );
