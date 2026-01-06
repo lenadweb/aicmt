@@ -6,6 +6,7 @@ AI-assisted git commits via OpenRouter. Designed for fast, consistent commit mes
 
 - Generates 3 commit message options from the staged diff
 - Splits changes into multiple logical commits with `--split`
+- Adds custom prefixes to commit messages with `--prefix`
 - Supports global defaults with per-repo overrides
 - Can auto-stage and auto-commit with `-y`
 - Logs AI request/response with `--verbose` for troubleshooting
@@ -83,6 +84,7 @@ If there are unstaged changes, aicmt will ask to stage them. It always commits a
 - `-y, --yes`: Skip prompts (stage all, pick first message, auto-confirm)
 - `-s, --split`: Split changes into multiple logical commits (file-level)
 - `--split-hunks`: Split changes at hunk level (experimental)
+- `--prefix <string>`: Add a prefix before the commit message (e.g., ticket number)
 
 ## Split mode
 
@@ -149,6 +151,28 @@ Proceed with these 2 commits? (Y/n)
 This is useful when a single file contains multiple unrelated changes. If something goes wrong, the tool will automatically rollback all commits.
 
 **Note:** This is experimental. Use `--dry-run` first to preview the proposed split.
+
+## Commit message prefix
+
+Add a prefix (like a ticket number) to all commit messages:
+
+```
+aicmt commit --prefix "DEV-95: "
+```
+
+The AI generates the commit message, then the prefix is added programmatically:
+
+```
+DEV-95: fix: update validation logic
+```
+
+This works with all modes:
+
+- `--prefix "JIRA-123: "`: Standard commit with prefix
+- `--prefix "TASK-456: " --split`: All split commits get the prefix
+- `--prefix "FIX-789: " -y`: Auto-commit with prefix
+
+The prefix is not sent to the AI, it's applied as post-processing to the generated message.
 
 ## Config format
 

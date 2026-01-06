@@ -41,6 +41,7 @@ export interface CommitOptions {
   yes?: boolean;
   split?: boolean;
   splitHunks?: boolean;
+  prefix?: string;
 }
 
 interface SplitCommitOptions {
@@ -56,6 +57,7 @@ interface SplitCommitOptions {
   dryRun: boolean;
   verbose: boolean;
   yes: boolean;
+  prefix?: string;
 }
 
 function formatCommitGroups(groups: CommitGroup[]): string {
@@ -74,6 +76,7 @@ async function runSplitCommit({
   dryRun,
   verbose,
   yes,
+  prefix,
 }: SplitCommitOptions): Promise<void> {
   // Collect all changed files
   const allFiles = [...new Set([...status.staged, ...status.unstaged])];
@@ -153,7 +156,8 @@ async function runSplitCommit({
   if (dryRun) {
     console.log('\n[dry-run] Would create the following commits:');
     for (const group of groups) {
-      console.log(`  - ${group.message} (${group.files.length} files)`);
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      console.log(`  - ${prefixedMessage} (${group.files.length} files)`);
     }
     return;
   }
@@ -165,10 +169,11 @@ async function runSplitCommit({
       // Stage only the files for this commit
       await stageFiles(repoRoot, group.files);
 
-      // Create the commit
-      await commitWithMessage(repoRoot, group.message);
+      // Apply prefix and create the commit
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      await commitWithMessage(repoRoot, prefixedMessage);
       createdCount++;
-      console.log(`Commit ${createdCount}/${groups.length}: ${group.message}`);
+      console.log(`Commit ${createdCount}/${groups.length}: ${prefixedMessage}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Failed to create commit: ${message}`);
@@ -192,6 +197,13 @@ function formatHunkGroups(groups: HunkCommitGroup[], hunksMap: Map<string, DiffH
     .join('\n\n');
 }
 
+function applyPrefix(message: string, prefix?: string): string {
+  if (!prefix) {
+    return message;
+  }
+  return `${prefix}${message}`;
+}
+
 async function runSplitHunksCommit({
   repoRoot,
   config,
@@ -199,6 +211,7 @@ async function runSplitHunksCommit({
   dryRun,
   verbose,
   yes,
+  prefix,
 }: SplitCommitOptions): Promise<void> {
   // Collect all changed files
   const allFiles = [...new Set([...status.staged, ...status.unstaged])];
@@ -293,7 +306,8 @@ async function runSplitHunksCommit({
   if (dryRun) {
     console.log('\n[dry-run] Would create the following commits:');
     for (const group of groups) {
-      console.log(`  - ${group.message} (${group.hunkIds.length} hunks)`);
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      console.log(`  - ${prefixedMessage} (${group.hunkIds.length} hunks)`);
     }
     return;
   }
@@ -310,7 +324,8 @@ async function runSplitHunksCommit({
         .filter((h): h is DiffHunk => h !== undefined);
 
       if (groupHunks.length === 0) {
-        console.warn(`Warning: No valid hunks for commit "${group.message}", skipping.`);
+        const prefixedMessage = applyPrefix(group.message, prefix);
+        console.warn(`Warning: No valid hunks for commit "${prefixedMessage}", skipping.`);
         continue;
       }
 
@@ -318,10 +333,11 @@ async function runSplitHunksCommit({
       const patch = buildPatchFromHunks(groupHunks);
       await applyPatch(repoRoot, patch);
 
-      // Create commit
-      await commitWithMessage(repoRoot, group.message);
+      // Apply prefix and create commit
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      await commitWithMessage(repoRoot, prefixedMessage);
       createdCount++;
-      console.log(`Commit ${createdCount}/${groups.length}: ${group.message}`);
+      console.log(`Commit ${createdCount}/${groups.length}: ${prefixedMessage}`);
     }
 
     console.log(`\nSuccessfully created ${createdCount} commits.`);
@@ -353,6 +369,7 @@ export async function runCommit({
   yes = false,
   split = false,
   splitHunks = false,
+  prefix,
 }: CommitOptions): Promise<void> {
   const isRepo = await isGitRepo(cwd);
   if (!isRepo) {
@@ -378,6 +395,7 @@ export async function runCommit({
       dryRun,
       verbose,
       yes,
+      prefix,
     });
     return;
   }
@@ -391,6 +409,7 @@ export async function runCommit({
       dryRun,
       verbose,
       yes,
+      prefix,
     });
     return;
   }
@@ -508,12 +527,15 @@ export async function runCommit({
     throw new Error('Commit message is empty.');
   }
 
+  // Apply prefix to commit message
+  const prefixedMessage = applyPrefix(finalMessage, prefix);
+
   if (!yes) {
     const { confirm } = await prompts(
       {
         type: 'confirm',
         name: 'confirm',
-        message: `Commit with message:\n${finalMessage}\nProceed?`,
+        message: `Commit with message:\n${prefixedMessage}\nProceed?`,
         initial: true,
       },
       promptOptions,
@@ -526,10 +548,10 @@ export async function runCommit({
   }
 
   if (dryRun) {
-    console.log(`[dry-run] ${finalMessage}`);
+    console.log(`[dry-run] ${prefixedMessage}`);
     return;
   }
 
-  await commitWithMessage(repoRoot, finalMessage);
-  console.log(`Commit created: ${finalMessage}`);
+  await commitWithMessage(repoRoot, prefixedMessage);
+  console.log(`Commit created: ${prefixedMessage}`);
 }

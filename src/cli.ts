@@ -38,6 +38,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .option('-y, --yes', 'Skip prompts: stage all, pick first message', false)
     .option('-s, --split', 'Split changes into multiple logical commits (file-level)', false)
     .option('--split-hunks', 'Split changes into multiple commits (hunk-level, experimental)', false)
+    .option('--prefix <string>', 'Prefix to add before commit message (e.g., "DEV-95: ")')
     .action(
       async (options: {
         config?: string;
@@ -46,6 +47,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         yes?: boolean;
         split?: boolean;
         splitHunks?: boolean;
+        prefix?: string;
       }) => {
       await runCommit({
         cwd: process.cwd(),
@@ -55,6 +57,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         yes: Boolean(options.yes),
         split: Boolean(options.split),
         splitHunks: Boolean(options.splitHunks),
+        prefix: options.prefix,
       });
     },
     );
