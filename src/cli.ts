@@ -19,7 +19,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   program
     .name('aicmt')
     .description('AI-assisted git commits via OpenRouter')
-    .version('0.1.0');
+    .version('0.1.4');
 
   program
     .command('init')
