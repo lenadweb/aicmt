@@ -4,6 +4,8 @@ import { resolveConfigPath } from './config';
 import { runCommit } from './commands/commit';
 import { runInit } from './commands/init';
 
+declare const __APP_VERSION__: string;
+
 async function configExists(configPath: string): Promise<boolean> {
   try {
     await access(configPath);
@@ -19,7 +21,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   program
     .name('aicmt')
     .description('AI-assisted git commits via OpenRouter')
-    .version('0.1.4');
+    .version(__APP_VERSION__);
 
   program
     .command('init')

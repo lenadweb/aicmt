@@ -1,6 +1,6 @@
 {
   "name": "@lenadweb/aicmt",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "AI-assisted git commits via OpenRouter",
   "main": "dist/cli.js",
   "author": "lenadweb",
