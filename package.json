@@ -23,6 +23,7 @@
   ],
   "scripts": {
     "build": "tsup",
+    "prepublishOnly": "npm run build",
     "start": "node dist/bin/aicmt.js",
     "init": "node dist/bin/aicmt.js init",
     "commit": "node dist/bin/aicmt.js commit"
@@ -48,6 +49,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
+    "@types/prompts": "^2.4.9",
     "tsup": "^8.2.4",
     "typescript": "^5.7.2"
   }
