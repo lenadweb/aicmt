@@ -6,6 +6,8 @@ AI-assisted git commits via OpenRouter or any OpenAI-compatible API (OpenAI, Oll
 
 - Generates commit message options from the staged diff (3 by default)
 - Lets you pick, regenerate, edit or write your own message
+- Works with a plain `git commit` through a git hook (`aicmt hook install`)
+- Follows the style of the repository's recent commit messages
 - Splits changes into multiple logical commits with `--split`
 - Adds prefixes: fixed (`--prefix`) or taken from the branch name (`branchPrefix`)
 - Layered config: global defaults, private per-repo override, shared `.aicmtrc.json`, environment variables and CLI flags
@@ -16,14 +18,14 @@ AI-assisted git commits via OpenRouter or any OpenAI-compatible API (OpenAI, Oll
 ## How it works
 
 - Takes the staged diff (or stages everything with `-a`)
-- Builds a prompt: your instructions + the diff, with ignored files hidden
+- Builds a prompt: your instructions, recent commit messages as style examples, and the diff with ignored files hidden
 - Requests commit message options from the model
 - Lets you pick one (or takes the first with `-y`)
 - Creates the git commit with the chosen message
 
 ## Requirements
 
-- Node.js 16+
+- Node.js 18+
 - Git
 
 ## Install
@@ -59,6 +61,7 @@ Settings are merged from several layers; later ones win:
 | `temperature` | Sampling temperature (0-2) | `0.2` |
 | `maxTokens` | Output tokens per message (32-512) | `120` |
 | `timeout` | Request timeout, seconds | `60` |
+| `historyExamples` | Recent commit messages sent as style examples (0 to disable) | `10` |
 | `ignore` | Extra glob patterns hidden from the AI (added to the built-in list of lock files, `*.min.js`, `*.map`) | `[]` |
 | `prefix` | Fixed prefix for every message | not set |
 | `branchPrefix` | Prefix taken from the branch name, see below | not set |
@@ -159,6 +162,26 @@ After picking a message you can commit it, edit it (inline for one line, in your
 - `-l, --lang <language>`: Language of commit messages
 - `-i, --instructions <text>`: Instructions for this run
 - `-t, --temperature <number>`, `--max-tokens <number>`, `-n, --count <number>`, `--timeout <seconds>`
+
+## Git hook
+
+Let a plain `git commit` fill in the message, also from IDEs and git GUIs:
+
+```
+aicmt hook install     # in the repository
+git add -p
+git commit             # the editor opens with a generated message
+```
+
+- The hook generates one message from the staged changes and puts it above git's comments, so you can still edit it or abort.
+- It does nothing for `git commit -m/-F`, merges, squashes and `--amend`. A `commit.template` without own text (like SourceTree's empty one) is filled in; a template with text is left alone.
+- If generation fails, the commit continues as usual with an empty message.
+- Skip it once with `AICMT_SKIP_HOOK=1 git commit`.
+- `aicmt hook status` and `aicmt hook uninstall` manage it. An existing `prepare-commit-msg` hook from another tool is not overwritten without `--force`.
+
+## Style from history
+
+The last 10 commit messages of the repository (without merges) are sent to the model as style examples, so it follows the project's format, casing and language even with short instructions. Automatic prefixes (`prefix`, `branchPrefix`) are removed from the examples so old ticket ids are not repeated. Change the number with `aicmt config set historyExamples 20`, or turn it off with `0`.
 
 ## Split mode
 
