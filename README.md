@@ -1,22 +1,24 @@
 # aicmt
 
-AI-assisted git commits via OpenRouter. Designed for fast, consistent commit messages with minimal prompts.
+AI-assisted git commits via OpenRouter or any OpenAI-compatible API (OpenAI, Ollama, LM Studio, ...). Designed for fast, consistent commit messages with minimal prompts.
 
 ## What it does
 
-- Generates 3 commit message options from the staged diff
+- Generates commit message options from the staged diff (3 by default)
+- Lets you pick, regenerate, edit or write your own message
 - Splits changes into multiple logical commits with `--split`
-- Adds custom prefixes to commit messages with `--prefix`
-- Supports global defaults with per-repo overrides
-- Can auto-stage and auto-commit with `-y`
-- Logs AI request/response with `--verbose` for troubleshooting
+- Adds prefixes: fixed (`--prefix`) or taken from the branch name (`branchPrefix`)
+- Layered config: global defaults, private per-repo override, shared `.aicmtrc.json`, environment variables and CLI flags
+- Hides lock files and other noise from the AI (`ignore`)
+- Retries on rate limits and server errors, with a request timeout
+- `aicmt config` to inspect and change settings, `aicmt doctor` to check the setup
 
 ## How it works
 
-- Collects staged diff; if unstaged files exist, it can stage all changes
-- Builds a minimal prompt: system instructions + raw diff
-- Requests 3 commit message options from OpenRouter
-- Lets you pick (or auto-picks the first with `-y`)
+- Takes the staged diff (or stages everything with `-a`)
+- Builds a prompt: your instructions + the diff, with ignored files hidden
+- Requests commit message options from the model
+- Lets you pick one (or takes the first with `-y`)
 - Creates the git commit with the chosen message
 
 ## Requirements
@@ -36,14 +38,76 @@ Or run without installing:
 npx @lenadweb/aicmt
 ```
 
-## Global config
+## Configuration
 
-The global config file lives at:
+Settings are merged from several layers; later ones win:
 
-- `$XDG_CONFIG_HOME/aicmt/config.json`
-- `~/.config/aicmt/config.json` (fallback)
+1. **Global defaults**: `~/.config/aicmt/config.json` (or `$XDG_CONFIG_HOME/aicmt/config.json`)
+2. **Private repo override**: the `projects["/path/to/repo"]` section of the global config
+3. **Shared repo config**: `.aicmtrc.json` in the repository root. Commit it to give the whole team the same style. It must not contain an API key.
+4. **Environment variables**: `AICMT_API_KEY` (or `OPENROUTER_API_KEY`), `AICMT_MODEL`, `AICMT_BASE_URL`, `AICMT_LANGUAGE`
+5. **CLI flags** for a single run
 
-Global defaults apply to all repos. Per-repo overrides live under `projects`.
+| Key | Description | Default |
+| --- | --- | --- |
+| `apiKey` | API key (global config or env only) | required for OpenRouter |
+| `baseUrl` | OpenAI-compatible API base URL | `https://openrouter.ai/api/v1` |
+| `model` | Model id | required |
+| `instructions` | How commit messages should look | required |
+| `language` | Language of commit messages | not set |
+| `count` | Number of message options (1-10) | `3` |
+| `temperature` | Sampling temperature (0-2) | `0.2` |
+| `maxTokens` | Output tokens per message (32-512) | `120` |
+| `timeout` | Request timeout, seconds | `60` |
+| `ignore` | Extra glob patterns hidden from the AI (added to the built-in list of lock files, `*.min.js`, `*.map`) | `[]` |
+| `prefix` | Fixed prefix for every message | not set |
+| `branchPrefix` | Prefix taken from the branch name, see below | not set |
+| `format` | Name of the format chosen in `init` (informational) | not set |
+
+Ignored files are still committed: only their content is hidden from the AI.
+
+Example `.aicmtrc.json`:
+
+```json
+{
+  "instructions": "Use Conventional Commits: type(scope): subject. Subject <= 72 chars.",
+  "language": "English",
+  "ignore": ["generated/**", "*.snap"],
+  "branchPrefix": { "pattern": "[A-Z]+-\\d+", "template": "{match}: " }
+}
+```
+
+### Managing settings
+
+```
+aicmt config                          # effective settings and where each comes from
+aicmt config get model
+aicmt config set model anthropic/claude-sonnet-4.5
+aicmt config set language Russian --scope repo      # writes .aicmtrc.json
+aicmt config set temperature 0.5 --scope project    # private override for this repo
+aicmt config set ignore "generated/**,*.snap" --scope repo
+aicmt config unset language --scope repo
+aicmt config path
+```
+
+Scopes: `global` (default), `project` (private override for this repo), `repo` (`.aicmtrc.json`).
+
+### Check the setup
+
+```
+aicmt doctor
+```
+
+Checks the git repository, config files, required settings, the branch prefix, API access, the API key and whether the model exists.
+
+### Local and other providers
+
+Any OpenAI-compatible API works. For a local Ollama no API key is needed:
+
+```
+aicmt config set baseUrl http://localhost:11434/v1
+aicmt config set model llama3.1
+```
 
 ## Init (interactive)
 
@@ -57,12 +121,13 @@ You will choose:
 
 - Commit format (preset or custom)
 - Additional instructions
+- Commit message language (optional)
 - Model, temperature, max tokens
-- Scope (global defaults or repo override)
+- Scope: global defaults, private repo override, or shared `.aicmtrc.json`
 
 ## Usage
 
-Default command runs `commit` (or `init` if no global config exists yet):
+Default command runs `commit` (or `init` if nothing is configured yet):
 
 ```
 aicmt
@@ -74,18 +139,26 @@ Explicit form:
 aicmt commit
 ```
 
-If there are unstaged changes, aicmt will ask to stage them. It always commits all changes that are staged.
+Only staged changes are committed, like `git commit`. Use `-a` to stage everything first. If nothing is staged, aicmt offers to stage all changes (`-y` does it without asking).
+
+After picking a message you can commit it, edit it (inline for one line, in your git editor for multi-line messages) or go back. `Regenerate` asks the AI for new options.
 
 ## Flags
 
 - `-c, --config <path>`: Custom global config path
+- `-a, --all`: Stage all changes (including untracked files) before committing
+- `-y, --yes`: Skip prompts and take the first message (stages all if nothing is staged)
 - `--dry-run`: Show the chosen message without committing
 - `-v, --verbose`: Print AI request and response logs
-- `-y, --yes`: Skip prompts (stage all, pick first message, auto-confirm)
 - `-s, --split`: Split changes into multiple logical commits (file-level)
 - `--split-hunks`: Split changes at hunk level (experimental)
 - `--prefix <string>`: Add a prefix before the commit message (e.g., ticket number)
-- `--model <id>`: Use a specific OpenRouter model for this run (overrides config, e.g. `--model openai/gpt-4o-mini`)
+- `--no-prefix`: Add no prefix at all, ignoring `prefix` and `branchPrefix`
+- `--model <id>`: Model for this run
+- `--base-url <url>`: API base URL for this run
+- `-l, --lang <language>`: Language of commit messages
+- `-i, --instructions <text>`: Instructions for this run
+- `-t, --temperature <number>`, `--max-tokens <number>`, `-n, --count <number>`, `--timeout <seconds>`
 
 ## Split mode
 
@@ -175,7 +248,19 @@ This works with all modes:
 - `--prefix "TASK-456: " --split`: All split commits get the prefix
 - `--prefix "FIX-789: " -y`: Auto-commit with prefix
 
-The prefix is not sent to the AI, it's applied as post-processing to the generated message.
+The prefix is not sent to the AI, it's applied as post-processing to the generated message. If the message already starts with the prefix, it is not added twice.
+
+### Prefix from the branch name
+
+Set `branchPrefix` to take the ticket id from the current branch:
+
+```
+aicmt config set branchPrefix "[A-Z]+-\\d+" --scope repo
+```
+
+On branch `feature/DEV-95-login` every message gets `DEV-95: `. The optional `template` controls the format: `{match}` is the first capture group (or the whole match), `{1}`, `{2}` are numbered groups. For example `{"pattern": "([A-Z]+-\\d+)", "template": "[{1}] "}` gives `[DEV-95] `.
+
+Priority: `--no-prefix` > `--prefix` > `prefix` setting > `branchPrefix`.
 
 ## Config format
 
@@ -183,7 +268,7 @@ Example global config with repo override:
 
 ```json
 {
-  "openrouterApiKey": "sk-...",
+  "apiKey": "sk-...",
   "model": "openai/gpt-4o-mini",
   "format": "conventional",
   "instructions": "Generate a short conventional-lite commit message:\n\nlowercase only\nno period, no emoji\nimperative verb (add / fix / update / remove / improve)\n3-7 words\ndescribe what was done, not why\n\nExamples:\nadd smart preview toggler\nfix expand text for smart preview\nremove custom font family\n\nContext:\n<brief description of code changes>\n\nReturn only one commit message.",
@@ -202,12 +287,14 @@ Notes:
 
 - `maxTokens` is clamped between 32 and 512 to prevent excessive output.
 - If a repo has no override, global defaults are used.
-- Keep the global config private (it contains your API key).
+- Keep the global config private (it contains your API key). The old key name `openrouterApiKey` is still read.
 
 ## Troubleshooting
 
-- `No config found for this repo` or `Missing ...`: run `aicmt init` to set global defaults or a repo override.
-- `OpenRouter error 400`: your output tokens are too high or diff is too large. Lower `maxTokens` or reduce the staged diff.
+- Start with `aicmt doctor`: it shows which step of the setup fails.
+- `Missing ...`: run `aicmt init`, or set the value with `aicmt config set` or an environment variable.
+- `AI API error 400`: the diff is too large or `maxTokens` is too high. Add noisy files to `ignore`, lower `maxTokens` or commit in smaller parts.
+- `request timed out`: raise `timeout` (`--timeout 120`) or use a faster model.
 - `Not a git repository`: run inside a git repo.
 
 ## Local development
