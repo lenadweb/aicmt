@@ -32,7 +32,6 @@ export const globalConfigSchema = sharedConfigSchema
 
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type GlobalConfig = z.infer<typeof globalConfigSchema>;
-export type GlobalDefaults = Omit<GlobalConfig, 'projects'>;
 
 export interface ResolvedConfig {
   openrouterApiKey: string;
@@ -109,31 +108,22 @@ export function resolveProjectConfig(
   const projectConfig = projects[repoRoot] ?? {};
   const merged = { ...defaults, ...projectConfig };
 
-  const missing: string[] = [];
-  if (!merged.openrouterApiKey) {
-    missing.push('openrouterApiKey');
-  }
-  if (!merged.model) {
-    missing.push('model');
-  }
-  if (!merged.format) {
-    missing.push('format');
-  }
-  if (!merged.instructions) {
-    missing.push('instructions');
-  }
-
-  if (missing.length > 0) {
+  const { openrouterApiKey, model, format, instructions } = merged;
+  if (!openrouterApiKey || !model || !format || !instructions) {
+    const required = { openrouterApiKey, model, format, instructions };
+    const missing = Object.entries(required)
+      .filter(([, value]) => !value)
+      .map(([key]) => key);
     throw new Error(
       `Missing ${missing.join(', ')} in config. Run aicmt init to set defaults.`,
     );
   }
 
   return applyDefaults({
-    openrouterApiKey: merged.openrouterApiKey,
-    model: merged.model,
-    format: merged.format,
-    instructions: merged.instructions,
+    openrouterApiKey,
+    model,
+    format,
+    instructions,
     temperature: merged.temperature,
     maxTokens: merged.maxTokens,
   });
