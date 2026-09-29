@@ -85,6 +85,7 @@ If there are unstaged changes, aicmt will ask to stage them. It always commits a
 - `-s, --split`: Split changes into multiple logical commits (file-level)
 - `--split-hunks`: Split changes at hunk level (experimental)
 - `--prefix <string>`: Add a prefix before the commit message (e.g., ticket number)
+- `--model <id>`: Use a specific OpenRouter model for this run (overrides config, e.g. `--model openai/gpt-4o-mini`)
 
 ## Split mode
 

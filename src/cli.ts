@@ -41,6 +41,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .option('-s, --split', 'Split changes into multiple logical commits (file-level)', false)
     .option('--split-hunks', 'Split changes into multiple commits (hunk-level, experimental)', false)
     .option('--prefix <string>', 'Prefix to add before commit message (e.g., "DEV-95: ")')
+    .option('--model <id>', 'OpenRouter model to use for this run (overrides config)')
     .action(
       async (options: {
         config?: string;
@@ -50,6 +51,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         split?: boolean;
         splitHunks?: boolean;
         prefix?: string;
+        model?: string;
       }) => {
       await runCommit({
         cwd: process.cwd(),
@@ -60,6 +62,7 @@ export async function run(argv: string[] = process.argv): Promise<void> {
         split: Boolean(options.split),
         splitHunks: Boolean(options.splitHunks),
         prefix: options.prefix,
+        model: options.model,
       });
     },
     );

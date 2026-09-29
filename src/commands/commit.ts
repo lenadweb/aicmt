@@ -42,6 +42,7 @@ export interface CommitOptions {
   split?: boolean;
   splitHunks?: boolean;
   prefix?: string;
+  model?: string;
 }
 
 interface SplitCommitOptions {
@@ -370,6 +371,7 @@ export async function runCommit({
   split = false,
   splitHunks = false,
   prefix,
+  model,
 }: CommitOptions): Promise<void> {
   const isRepo = await isGitRepo(cwd);
   if (!isRepo) {
@@ -380,6 +382,11 @@ export async function runCommit({
   const resolvedConfigPath = resolveConfigPath(repoRoot, configPath);
   const globalConfig = await loadGlobalConfig(resolvedConfigPath);
   const config = resolveProjectConfig(globalConfig, repoRoot);
+
+  const modelOverride = model?.trim();
+  if (modelOverride) {
+    config.model = modelOverride;
+  }
 
   let status = await getStatus(repoRoot);
   if (status.staged.length === 0 && status.unstaged.length === 0) {
