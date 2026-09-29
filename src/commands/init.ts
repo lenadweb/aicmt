@@ -8,10 +8,14 @@ import {
 } from '../constants';
 import {
   GlobalConfig,
-  ProjectConfig,
+  RepoConfig,
+  getRepoConfigPath,
   loadGlobalConfig,
+  loadRepoConfig,
+  readEnvConfig,
   resolveConfigPath,
   saveGlobalConfig,
+  saveRepoConfig,
 } from '../config';
 import { getRepoRoot, isGitRepo } from '../git';
 
@@ -150,6 +154,16 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
   const extra = String(extraInstructions || '').trim();
   const instructions = extra ? `${baseInstructions}\n${extra}` : baseInstructions;
 
+  const { language } = await prompts(
+    {
+      type: 'text',
+      name: 'language',
+      message: 'Commit message language (optional, e.g. English, Russian)',
+      initial: '',
+    },
+    promptOptions,
+  );
+
   const { model } = await prompts(
     {
       type: 'text',
@@ -199,9 +213,14 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
           description: 'Used when a repo has no override',
         },
         {
-          title: 'This repo only (override)',
+          title: 'This repo only (private override)',
           value: 'project',
-          description: 'Use custom settings for this repository',
+          description: 'Stored in your global config, only on this machine',
+        },
+        {
+          title: 'This repo, shared with the team (.aicmtrc.json)',
+          value: 'repo',
+          description: 'Stored in the repository; commit it to share. The API key is never written there',
         },
       ],
       initial: 0,
@@ -209,7 +228,8 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     promptOptions,
   );
 
-  const targetScope = scope === 'project' ? 'project' : 'global';
+  const targetScope: 'global' | 'project' | 'repo' =
+    scope === 'project' || scope === 'repo' ? scope : 'global';
 
   if (targetScope === 'global' && hasGlobalDefaults(existingConfig)) {
     const { overwrite } = await prompts(
@@ -245,8 +265,27 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     }
   }
 
-  let globalApiKey = existingConfig.openrouterApiKey ?? '';
-  if (globalApiKey) {
+  if (targetScope === 'repo' && (await loadRepoConfig(repoRoot))) {
+    const { overwrite } = await prompts(
+      {
+        type: 'confirm',
+        name: 'overwrite',
+        message: `${getRepoConfigPath(repoRoot)} already exists. Overwrite?`,
+        initial: false,
+      },
+      promptOptions,
+    );
+
+    if (!overwrite) {
+      console.log('Init cancelled.');
+      return;
+    }
+  }
+
+  let globalApiKey = existingConfig.apiKey ?? existingConfig.openrouterApiKey ?? '';
+  if (readEnvConfig().apiKey) {
+    console.log('Using the API key from the environment (AICMT_API_KEY / OPENROUTER_API_KEY).');
+  } else if (globalApiKey) {
     const { reuseKey } = await prompts(
       {
         type: 'confirm',
@@ -284,10 +323,12 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     globalApiKey = String(apiKey || '').trim();
   }
 
-  const projectConfig: ProjectConfig = {
+  const languageValue = String(language || '').trim();
+  const settings: RepoConfig = {
     model: String(model || DEFAULT_MODEL).trim(),
     format: String(format || 'custom'),
     instructions: instructions.trim(),
+    ...(languageValue ? { language: languageValue } : {}),
     temperature:
       typeof temperature === 'number' && !Number.isNaN(temperature)
         ? temperature
@@ -305,16 +346,25 @@ export async function runInit({ cwd, configPath }: InitOptions): Promise<void> {
     },
   };
 
-  updatedConfig.openrouterApiKey = globalApiKey;
+  if (globalApiKey) {
+    delete updatedConfig.openrouterApiKey;
+    updatedConfig.apiKey = globalApiKey;
+  }
 
   if (targetScope === 'global') {
-    updatedConfig.model = projectConfig.model;
-    updatedConfig.format = projectConfig.format;
-    updatedConfig.instructions = projectConfig.instructions;
-    updatedConfig.temperature = projectConfig.temperature;
-    updatedConfig.maxTokens = projectConfig.maxTokens;
-  } else {
-    updatedConfig.projects[repoRoot] = projectConfig;
+    Object.assign(updatedConfig, settings);
+  } else if (targetScope === 'project') {
+    updatedConfig.projects[repoRoot] = settings;
+  }
+
+  if (targetScope === 'repo') {
+    await saveRepoConfig(repoRoot, settings);
+    console.log(`Repo config saved to ${getRepoConfigPath(repoRoot)} (commit it to share with the team).`);
+    if (globalApiKey) {
+      await saveGlobalConfig(resolvedConfigPath, updatedConfig);
+      console.log(`API key kept in ${resolvedConfigPath}.`);
+    }
+    return;
   }
 
   await saveGlobalConfig(resolvedConfigPath, updatedConfig);

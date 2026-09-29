@@ -194,7 +194,7 @@ function stripDiffPathPrefix(raw: string): string | null {
   return value.replace(/^[ab]\//, '');
 }
 
-function extractFileFromDiffHeader(line: string): string {
+export function extractFileFromDiffHeader(line: string): string {
   // "diff --git a/path/to/file b/path/to/file" -> "path/to/file"
   // Both sides are equal with --no-renames, so split the rest in half.
   const rest = line.slice('diff --git '.length);
@@ -352,6 +352,22 @@ export async function applyPatch(repoRoot: string, patch: string): Promise<void>
       // Ignore cleanup errors
     }
   }
+}
+
+/** Current branch name, or undefined on a detached HEAD. */
+export async function getCurrentBranch(repoRoot: string): Promise<string | undefined> {
+  try {
+    const result = await runGit(['symbolic-ref', '--short', '-q', 'HEAD'], repoRoot);
+    return result.stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The editor git itself would use (GIT_EDITOR, core.editor, VISUAL, EDITOR, then vi). */
+export async function getGitEditor(repoRoot: string): Promise<string> {
+  const result = await runGit(['var', 'GIT_EDITOR'], repoRoot);
+  return result.stdout.trim();
 }
 
 export async function getCurrentHead(repoRoot: string): Promise<string> {

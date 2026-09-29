@@ -1,12 +1,32 @@
 import { fetch } from 'undici';
+import type { ResolvedConfig } from './config';
+import { extractFileFromDiffHeader } from './git';
+import { createPathMatcher, sleep } from './utils';
 
-interface OpenRouterResponse {
+/** Everything needed to talk to the model. */
+export type AiSettings = Pick<
+  ResolvedConfig,
+  | 'apiKey'
+  | 'baseUrl'
+  | 'model'
+  | 'instructions'
+  | 'language'
+  | 'temperature'
+  | 'maxTokens'
+  | 'timeoutMs'
+  | 'ignore'
+>;
+
+interface CompletionResponse {
   choices?: Array<{
     message?: {
       content?: string;
     };
   }>;
 }
+
+const MAX_ATTEMPTS = 3;
+const RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 const LARGE_NEW_FILE_LINE_LIMIT = 400;
 const LARGE_NEW_FILE_HEAD_LINES = 120;
@@ -151,29 +171,54 @@ function compressLargeNewFiles(diff: string): string {
   return compressed.flat().join('\n');
 }
 
-function normalizeMessages(messages: string[]): string[] {
-  const unique: string[] = [];
-  for (const message of messages) {
-    if (!unique.includes(message)) {
-      unique.push(message);
-    }
+/** Replaces the content of ignored files with a marker, keeping their headers. */
+function omitIgnoredFiles(diff: string, ignore: string[]): string {
+  if (ignore.length === 0) {
+    return diff;
   }
 
-  if (unique.length < 3) {
-    throw new Error('OpenRouter returned fewer than 3 messages');
+  const isIgnored = createPathMatcher(ignore);
+  return splitDiffBlocks(diff)
+    .map((block) => {
+      if (!block[0]?.startsWith('diff --git ') || !isIgnored(extractFileFromDiffHeader(block[0]))) {
+        return block;
+      }
+      const hunkStart = block.findIndex(
+        (line) => line.startsWith('@@') || line.startsWith('GIT binary patch'),
+      );
+      const header = hunkStart === -1 ? block : block.slice(0, hunkStart);
+      return [...header, '[content omitted: file matches an ignore pattern]'];
+    })
+    .flat()
+    .join('\n');
+}
+
+/** Diff as sent to the model: ignored files hidden, huge new files shortened. */
+function prepareDiff(diff: string, ignore: string[]): string {
+  const trimmed = diff.trim();
+  return trimmed ? compressLargeNewFiles(omitIgnoredFiles(trimmed, ignore)) : '[No diff available]';
+}
+
+function formatInstructions({ instructions, language }: AiSettings): string {
+  return language
+    ? `${instructions}\nWrite commit messages in ${language}.`
+    : instructions;
+}
+
+function normalizeMessages(messages: string[], count: number): string[] {
+  const unique = [...new Set(messages)];
+  if (unique.length === 0) {
+    throw new Error('AI returned no commit messages');
   }
 
-  return unique.slice(0, 3);
+  return unique.slice(0, count);
 }
 
 export interface GenerateCommitMessagesInput {
-  apiKey: string;
-  model: string;
-  instructions: string;
+  settings: AiSettings;
   diff: string;
-  temperature: number;
-  maxTokens: number;
-  onDebug?: (info: OpenRouterDebugInfo) => void;
+  count: number;
+  onDebug?: (info: AiDebugInfo) => void;
 }
 
 export interface CommitGroup {
@@ -193,28 +238,20 @@ export interface HunkInfo {
 }
 
 export interface GenerateCommitGroupsInput {
-  apiKey: string;
-  model: string;
-  instructions: string;
+  settings: AiSettings;
   diff: string;
   files: string[];
-  temperature: number;
-  maxTokens: number;
-  onDebug?: (info: OpenRouterDebugInfo) => void;
+  onDebug?: (info: AiDebugInfo) => void;
 }
 
 export interface GenerateHunkGroupsInput {
-  apiKey: string;
-  model: string;
-  instructions: string;
+  settings: AiSettings;
   hunks: HunkInfo[];
   fullDiff: string;
-  temperature: number;
-  maxTokens: number;
-  onDebug?: (info: OpenRouterDebugInfo) => void;
+  onDebug?: (info: AiDebugInfo) => void;
 }
 
-export interface OpenRouterDebugInfo {
+export interface AiDebugInfo {
   stage: 'request' | 'response';
   prompt: string;
   payload: Record<string, unknown>;
@@ -223,119 +260,156 @@ export interface OpenRouterDebugInfo {
 }
 
 interface CompletionRequest {
-  apiKey: string;
-  model: string;
+  settings: AiSettings;
   systemContent: string;
   prompt: string;
-  temperature: number;
   maxTokens: number;
-  onDebug?: (info: OpenRouterDebugInfo) => void;
+  onDebug?: (info: AiDebugInfo) => void;
 }
 
-/** Sends one chat completion request and returns the text of the first choice. */
+function describeErrorResponse(status: number, responseText: string): string {
+  try {
+    const parsed = JSON.parse(responseText) as { error?: { message?: string } | string };
+    const message = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message;
+    if (message) {
+      return `AI API error ${status}: ${message}`;
+    }
+  } catch {
+    // not JSON: fall through to the raw text
+  }
+  return `AI API error ${status}: ${responseText.slice(0, 500)}`;
+}
+
+function retryDelayMs(attempt: number, retryAfter: string | null): number {
+  const seconds = Number(retryAfter);
+  if (retryAfter && Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 30_000);
+  }
+  return 1000 * 2 ** (attempt - 1);
+}
+
+/**
+ * Sends one chat completion request to an OpenAI-compatible API and returns the text of the
+ * first choice. Timeouts, network errors, rate limits and 5xx responses are retried.
+ */
 async function requestCompletion({
-  apiKey,
-  model,
+  settings,
   systemContent,
   prompt,
-  temperature,
   maxTokens,
   onDebug,
 }: CompletionRequest): Promise<string> {
   const payload: Record<string, unknown> = {
-    model,
+    model: settings.model,
     messages: [
       { role: 'system', content: systemContent },
       { role: 'user', content: prompt },
     ],
-    temperature,
+    temperature: settings.temperature,
     max_tokens: maxTokens,
   };
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://aicmt.local',
+    'X-Title': 'aicmt',
+  };
+  if (settings.apiKey) {
+    headers.Authorization = `Bearer ${settings.apiKey}`;
+  }
+
   onDebug?.({ stage: 'request', prompt, payload });
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://aicmt.local',
-      'X-Title': 'aicmt',
-    },
-    body: JSON.stringify(payload),
-  });
+  for (let attempt = 1; ; attempt++) {
+    const canRetry = attempt < MAX_ATTEMPTS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
 
-  const responseText = await response.text();
-  onDebug?.({
-    stage: 'response',
-    prompt,
-    payload,
-    responseText,
-    status: response.status,
-  });
+    let status: number;
+    let retryAfter: string | null;
+    let responseText: string;
+    try {
+      const response = await fetch(`${settings.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      status = response.status;
+      retryAfter = response.headers.get('retry-after');
+      responseText = await response.text();
+    } catch (error) {
+      const reason = controller.signal.aborted
+        ? `request timed out after ${settings.timeoutMs / 1000}s`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      if (canRetry) {
+        await sleep(retryDelayMs(attempt, null));
+        continue;
+      }
+      throw new Error(`AI API request failed (${settings.baseUrl}): ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
 
-  if (!response.ok) {
-    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
+    onDebug?.({ stage: 'response', prompt, payload, responseText, status });
+
+    if (status < 200 || status >= 300) {
+      if (canRetry && RETRYABLE_STATUSES.has(status)) {
+        await sleep(retryDelayMs(attempt, retryAfter));
+        continue;
+      }
+      throw new Error(describeErrorResponse(status, responseText));
+    }
+
+    let data: CompletionResponse;
+    try {
+      data = JSON.parse(responseText) as CompletionResponse;
+    } catch {
+      throw new Error('AI API returned invalid JSON');
+    }
+
+    const content = data.choices?.[0]?.message?.content ?? '';
+    if (!content) {
+      throw new Error('AI API returned empty content');
+    }
+
+    return content;
   }
-
-  let data: OpenRouterResponse;
-  try {
-    data = JSON.parse(responseText) as OpenRouterResponse;
-  } catch {
-    throw new Error('OpenRouter returned invalid JSON');
-  }
-
-  const content = data.choices?.[0]?.message?.content ?? '';
-  if (!content) {
-    throw new Error('OpenRouter returned empty content');
-  }
-
-  return content;
 }
 
 export async function generateCommitMessages({
-  apiKey,
-  model,
-  instructions,
+  settings,
   diff,
-  temperature,
-  maxTokens,
+  count,
   onDebug,
 }: GenerateCommitMessagesInput): Promise<string[]> {
-  const trimmedDiff = diff.trim();
-  const diffText = trimmedDiff
-    ? compressLargeNewFiles(trimmedDiff)
-    : '[No diff available]';
-
   const systemContent = [
     'You generate git commit messages for staged changes.',
-    'Return ONLY a JSON array of exactly 3 strings.',
+    count === 1
+      ? 'Return ONLY a JSON array with exactly 1 string.'
+      : `Return ONLY a JSON array of exactly ${count} different strings.`,
     'Each string must be a commit message that matches the instructions.',
     'Each option must summarize the full set of changes in this diff as a single commit.',
     'Do not include any extra commentary or markdown.',
     '',
     'Instructions:',
-    instructions,
+    formatInstructions(settings),
   ].join('\n');
-  const prompt = diffText;
+  const prompt = prepareDiff(diff, settings.ignore);
 
   const content = await requestCompletion({
-    apiKey,
-    model,
+    settings,
     systemContent,
     prompt,
-    temperature,
-    maxTokens,
+    // Room for every option, not just one message
+    maxTokens: settings.maxTokens * Math.max(1, count),
     onDebug,
   });
 
   const jsonMessages = parseJsonArray(content);
-  if (jsonMessages) {
-    return normalizeMessages(jsonMessages);
-  }
-
-  const lineMessages = parseLines(content);
-  return normalizeMessages(lineMessages);
+  return normalizeMessages(jsonMessages ?? parseLines(content), count);
 }
 
 function parseCommitGroups(text: string): CommitGroup[] | null {
@@ -437,19 +511,12 @@ export function reconcileHunkGroups(
 }
 
 export async function generateCommitGroups({
-  apiKey,
-  model,
-  instructions,
+  settings,
   diff,
   files,
-  temperature,
-  maxTokens,
   onDebug,
 }: GenerateCommitGroupsInput): Promise<CommitGroup[]> {
-  const trimmedDiff = diff.trim();
-  const diffText = trimmedDiff
-    ? compressLargeNewFiles(trimmedDiff)
-    : '[No diff available]';
+  const diffText = prepareDiff(diff, settings.ignore);
 
   const systemContent = [
     'You analyze git diffs and group changed files into logical commits.',
@@ -469,7 +536,7 @@ export async function generateCommitGroups({
     '- Do not include any extra commentary or markdown',
     '',
     'Commit message instructions:',
-    instructions,
+    formatInstructions(settings),
   ].join('\n');
 
   const prompt = [
@@ -482,14 +549,12 @@ export async function generateCommitGroups({
 
   // Structured output grows with the number of files: leave room so the JSON is not cut off
   const content = await requestCompletion({
-    apiKey,
-    model,
+    settings,
     systemContent,
     prompt,
-    temperature,
     maxTokens: Math.min(
       SPLIT_MAX_TOKENS_CAP,
-      Math.max(maxTokens * 3, 1000) + files.length * SPLIT_TOKENS_PER_ITEM,
+      Math.max(settings.maxTokens * 3, 1000) + files.length * SPLIT_TOKENS_PER_ITEM,
     ),
     onDebug,
   });
@@ -528,19 +593,12 @@ function parseHunkGroups(text: string): HunkCommitGroup[] | null {
 }
 
 export async function generateCommitGroupsFromHunks({
-  apiKey,
-  model,
-  instructions,
+  settings,
   hunks,
   fullDiff,
-  temperature,
-  maxTokens,
   onDebug,
 }: GenerateHunkGroupsInput): Promise<HunkCommitGroup[]> {
-  const trimmedDiff = fullDiff.trim();
-  const diffText = trimmedDiff
-    ? compressLargeNewFiles(trimmedDiff)
-    : '[No diff available]';
+  const diffText = prepareDiff(fullDiff, settings.ignore);
 
   const systemContent = [
     'You analyze git diffs and group change hunks into logical commits.',
@@ -562,7 +620,7 @@ export async function generateCommitGroupsFromHunks({
     '- Do not include any extra commentary or markdown',
     '',
     'Commit message instructions:',
-    instructions,
+    formatInstructions(settings),
   ].join('\n');
 
   const hunksList = hunks
@@ -579,14 +637,12 @@ export async function generateCommitGroupsFromHunks({
 
   // Structured output grows with the number of hunks: leave room so the JSON is not cut off
   const content = await requestCompletion({
-    apiKey,
-    model,
+    settings,
     systemContent,
     prompt,
-    temperature,
     maxTokens: Math.min(
       SPLIT_MAX_TOKENS_CAP,
-      Math.max(maxTokens * 4, 1000) + hunks.length * SPLIT_TOKENS_PER_ITEM,
+      Math.max(settings.maxTokens * 4, 1000) + hunks.length * SPLIT_TOKENS_PER_ITEM,
     ),
     onDebug,
   });

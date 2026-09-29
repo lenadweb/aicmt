@@ -1,12 +1,14 @@
 import prompts from 'prompts';
-import { loadGlobalConfig, resolveConfigPath, resolveProjectConfig } from '../config';
+import { BranchPrefix, ConfigLayer, loadConfig, ResolvedConfig } from '../config';
 import {
   applyPatch,
   buildPatchFromHunks,
   commitWithMessage,
   DiffHunk,
   filterDiffByFiles,
+  getCurrentBranch,
   getCurrentHead,
+  getGitEditor,
   getRepoRoot,
   getStagedDiff,
   getStatus,
@@ -20,15 +22,16 @@ import {
   unstageAll,
 } from '../git';
 import {
+  AiDebugInfo,
   CommitGroup,
   generateCommitGroups,
   generateCommitGroupsFromHunks,
   generateCommitMessages,
   HunkCommitGroup,
-  OpenRouterDebugInfo,
   reconcileFileGroups,
   reconcileHunkGroups,
-} from '../openrouter';
+} from '../ai';
+import { createPathMatcher, editInEditor, withSpinner } from '../utils';
 
 const promptOptions = {
   onCancel: () => {
@@ -42,23 +45,18 @@ export interface CommitOptions {
   dryRun?: boolean;
   verbose?: boolean;
   yes?: boolean;
+  all?: boolean;
   split?: boolean;
   splitHunks?: boolean;
-  prefix?: string;
-  model?: string;
+  /** Skip every prefix, including one derived from the branch. */
+  noPrefix?: boolean;
+  /** Settings given on the command line; they win over every config file. */
+  overrides?: ConfigLayer;
 }
-
-type SplitConfig = {
-  openrouterApiKey: string;
-  model: string;
-  instructions: string;
-  temperature: number;
-  maxTokens: number;
-};
 
 interface SplitCommitOptions {
   repoRoot: string;
-  config: SplitConfig;
+  config: ResolvedConfig;
   dryRun: boolean;
   verbose: boolean;
   yes: boolean;
@@ -66,14 +64,14 @@ interface SplitCommitOptions {
 }
 
 interface DebugCollector {
-  onDebug: (info: OpenRouterDebugInfo) => void;
+  onDebug: (info: AiDebugInfo) => void;
   print: () => void;
 }
 
 function createDebugCollector(verbose: boolean): DebugCollector {
   const debugInfo: {
-    request?: OpenRouterDebugInfo;
-    response?: OpenRouterDebugInfo;
+    request?: AiDebugInfo;
+    response?: AiDebugInfo;
   } = {};
 
   return {
@@ -124,10 +122,39 @@ function formatHunkGroups(groups: HunkCommitGroup[]): string {
 }
 
 function applyPrefix(message: string, prefix?: string): string {
-  if (!prefix) {
+  if (!prefix || message.startsWith(prefix)) {
     return message;
   }
   return `${prefix}${message}`;
+}
+
+/**
+ * Builds a prefix from the branch name, e.g. pattern "[A-Z]+-\d+" turns
+ * "feature/DEV-95-login" into "DEV-95: ". The template can use {match} (first capture
+ * group, or the whole match) and numbered groups like {1}.
+ */
+export function prefixFromBranch(branch: string, { pattern, template }: BranchPrefix): string | undefined {
+  const match = branch.match(new RegExp(pattern));
+  if (!match) {
+    return undefined;
+  }
+
+  return (template ?? '{match}: ').replace(/\{(match|\d+)\}/g, (_, key: string) =>
+    key === 'match' ? (match[1] ?? match[0]) : (match[Number(key)] ?? ''),
+  );
+}
+
+async function resolvePrefix(repoRoot: string, config: ResolvedConfig): Promise<string | undefined> {
+  if (config.prefix) {
+    return config.prefix;
+  }
+
+  if (!config.branchPrefix) {
+    return undefined;
+  }
+
+  const branch = await getCurrentBranch(repoRoot);
+  return branch ? prefixFromBranch(branch, config.branchPrefix) : undefined;
 }
 
 async function ensureHead(repoRoot: string): Promise<void> {
@@ -138,20 +165,14 @@ async function ensureHead(repoRoot: string): Promise<void> {
 
 /** Commit message for changes the model left out of its grouping. */
 async function generateLeftoverMessage(
-  config: SplitConfig,
+  config: ResolvedConfig,
   diff: string,
   verbose: boolean,
 ): Promise<string> {
   const debug = createDebugCollector(verbose);
-  const messages = await generateCommitMessages({
-    apiKey: config.openrouterApiKey,
-    model: config.model,
-    instructions: config.instructions,
-    diff,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onDebug: debug.onDebug,
-  });
+  const messages = await withSpinner('Generating message for the remaining changes...', () =>
+    generateCommitMessages({ settings: config, diff, count: 1, onDebug: debug.onDebug }),
+  );
   debug.print();
   return messages[0];
 }
@@ -244,27 +265,18 @@ async function runSplitCommit({
     throw new Error('No changes to commit.');
   }
 
-  console.log(`Analyzing ${files.length} changed files...`);
-
   const debug = createDebugCollector(verbose);
 
   // Ask AI to group the files into logical commits
-  const rawGroups = await generateCommitGroups({
-    apiKey: config.openrouterApiKey,
-    model: config.model,
-    instructions: config.instructions,
-    diff,
-    files,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onDebug: debug.onDebug,
-  });
+  const rawGroups = await withSpinner(`Analyzing ${files.length} changed files...`, () =>
+    generateCommitGroups({ settings: config, diff, files, onDebug: debug.onDebug }),
+  );
   debug.print();
 
   const { groups, leftover } = reconcileFileGroups(rawGroups, files);
 
   if (leftover.length > 0) {
-    console.log(`AI skipped ${leftover.length} files, generating a separate commit for them...`);
+    console.log(`AI skipped ${leftover.length} files, generating a separate commit for them.`);
     const message = await generateLeftoverMessage(
       config,
       filterDiffByFiles(diff, leftover),
@@ -319,28 +331,32 @@ async function runSplitHunksCommit({
     hunksMap.set(hunk.id, hunk);
   }
 
-  console.log(`Analyzing ${hunks.length} hunks across ${hunkDiff.files.length} files...`);
-  console.log('(experimental hunk-level split mode)\n');
+  console.log('(experimental hunk-level split mode)');
 
+  const isIgnored = createPathMatcher(config.ignore);
   const debug = createDebugCollector(verbose);
 
   // Ask AI to group hunks into logical commits
-  const rawGroups = await generateCommitGroupsFromHunks({
-    apiKey: config.openrouterApiKey,
-    model: config.model,
-    instructions: config.instructions,
-    hunks: hunks.map((h) => ({ id: h.id, file: h.file, summary: h.summary })),
-    fullDiff,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onDebug: debug.onDebug,
-  });
+  const rawGroups = await withSpinner(
+    `Analyzing ${hunks.length} hunks across ${hunkDiff.files.length} files...`,
+    () =>
+      generateCommitGroupsFromHunks({
+        settings: config,
+        hunks: hunks.map((h) => ({
+          id: h.id,
+          file: h.file,
+          summary: isIgnored(h.file) ? '[content omitted]' : h.summary,
+        })),
+        fullDiff,
+        onDebug: debug.onDebug,
+      }),
+  );
   debug.print();
 
   const { groups, leftover } = reconcileHunkGroups(rawGroups, [...hunksMap.keys()]);
 
   if (leftover.length > 0) {
-    console.log(`AI skipped ${leftover.length} hunks, generating a separate commit for them...`);
+    console.log(`AI skipped ${leftover.length} hunks, generating a separate commit for them.`);
     const leftoverHunks = leftover.map((id) => hunksMap.get(id) as DiffHunk);
     const message = await generateLeftoverMessage(
       config,
@@ -351,7 +367,7 @@ async function runSplitHunksCommit({
     groups.push({ hunkIds: leftover, message });
   }
 
-  console.log(`Proposed ${groups.length} commits:\n`);
+  console.log(`\nProposed ${groups.length} commits:\n`);
   console.log(formatHunkGroups(groups));
 
   if (!(await confirmSplit(groups.length, yes))) {
@@ -379,109 +395,75 @@ async function runSplitHunksCommit({
   });
 }
 
-export async function runCommit({
-  cwd,
-  configPath,
-  dryRun = false,
-  verbose = false,
-  yes = false,
-  split = false,
-  splitHunks = false,
-  prefix,
-  model,
-}: CommitOptions): Promise<void> {
-  const isRepo = await isGitRepo(cwd);
-  if (!isRepo) {
-    throw new Error('Not a git repository. Run inside a git project.');
-  }
+/**
+ * Decides what goes into a regular commit: the index as it is, unless --all is given or
+ * nothing is staged yet (then everything is staged, after asking unless --yes).
+ */
+async function prepareStaging(repoRoot: string, all: boolean, yes: boolean): Promise<void> {
+  const status = await getStatus(repoRoot);
 
-  const repoRoot = await getRepoRoot(cwd);
-  const resolvedConfigPath = resolveConfigPath(repoRoot, configPath);
-  const globalConfig = await loadGlobalConfig(resolvedConfigPath);
-  const config = resolveProjectConfig(globalConfig, repoRoot);
-
-  const modelOverride = model?.trim();
-  if (modelOverride) {
-    config.model = modelOverride;
-  }
-
-  let status = await getStatus(repoRoot);
-  if (status.staged.length === 0 && status.unstaged.length === 0) {
-    throw new Error('No changes to commit.');
-  }
-
-  // Hunk-level split mode (experimental)
-  if (splitHunks) {
-    await runSplitHunksCommit({
-      repoRoot,
-      config,
-      dryRun,
-      verbose,
-      yes,
-      prefix,
-    });
+  if (all) {
+    await stageAll(repoRoot);
     return;
   }
 
-  // File-level split mode
-  if (split) {
-    await runSplitCommit({
-      repoRoot,
-      config,
-      dryRun,
-      verbose,
-      yes,
-      prefix,
-    });
-    return;
-  }
-
-  if (status.unstaged.length > 0) {
-    if (yes) {
-      await stageAll(repoRoot);
-    } else {
+  if (status.staged.length === 0) {
+    if (!yes) {
       const { stage } = await prompts(
         {
           type: 'confirm',
           name: 'stage',
-          message: 'Unstaged changes detected. Stage all changes?',
+          message: 'Nothing is staged. Stage all changes?',
           initial: true,
         },
         promptOptions,
       );
 
       if (!stage) {
-        throw new Error('Aborted: commit requires all changes to be staged.');
+        throw new Error('Nothing to commit: stage changes with git add or use --all.');
       }
-
-      await stageAll(repoRoot);
     }
-    status = await getStatus(repoRoot);
+
+    await stageAll(repoRoot);
+    return;
   }
 
-  if (status.staged.length === 0) {
-    throw new Error('No staged changes to commit.');
+  if (status.unstaged.length > 0) {
+    console.log(
+      `Committing staged changes only; ${status.unstaged.length} files with unstaged changes are not included (use --all to include them).`,
+    );
+  }
+}
+
+async function editMessage(repoRoot: string, message: string): Promise<string> {
+  // A one-line message is quicker to fix inline; multi-line ones go to the editor
+  if (!message.includes('\n')) {
+    const { edited } = await prompts(
+      {
+        type: 'text',
+        name: 'edited',
+        message: 'Edit commit message',
+        initial: message,
+      },
+      promptOptions,
+    );
+    return String(edited ?? '').trim() || message;
   }
 
-  const diff = await getStagedDiff(repoRoot);
+  const editor = await getGitEditor(repoRoot);
+  return (await editInEditor(editor, message, repoRoot)) || message;
+}
 
-  const debug = createDebugCollector(verbose);
+/** Interactive choice: pick, regenerate, write or edit a message. Returns null if aborted. */
+async function chooseMessage(
+  repoRoot: string,
+  generate: () => Promise<string[]>,
+  prefix: string | undefined,
+): Promise<string | null> {
+  let messages = await generate();
 
-  const messages = await generateCommitMessages({
-    apiKey: config.openrouterApiKey,
-    model: config.model,
-    instructions: config.instructions,
-    diff,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onDebug: debug.onDebug,
-  });
-  debug.print();
-
-  let finalMessage = messages[0] ?? '';
-
-  if (!yes) {
-    const choicePrompt = await prompts(
+  for (;;) {
+    const { selection } = await prompts(
       {
         type: 'select',
         name: 'selection',
@@ -492,6 +474,7 @@ export async function runCommit({
             value: message,
             description: `Option ${index + 1}`,
           })),
+          { title: 'Regenerate', value: '__regenerate', description: 'Ask the AI for new options' },
           { title: 'Custom message', value: '__custom', description: 'Write your own' },
           { title: 'Abort', value: '__abort', description: 'Cancel commit' },
         ],
@@ -499,14 +482,17 @@ export async function runCommit({
       promptOptions,
     );
 
-    if (!choicePrompt.selection || choicePrompt.selection === '__abort') {
-      console.log('Commit cancelled.');
-      return;
+    if (!selection || selection === '__abort') {
+      return null;
     }
 
-    finalMessage = String(choicePrompt.selection);
+    if (selection === '__regenerate') {
+      messages = await generate();
+      continue;
+    }
 
-    if (choicePrompt.selection === '__custom') {
+    let message = String(selection);
+    if (selection === '__custom') {
       const { customMessage } = await prompts(
         {
           type: 'text',
@@ -517,34 +503,115 @@ export async function runCommit({
         },
         promptOptions,
       );
+      message = String(customMessage || '').trim();
+    }
 
-      finalMessage = String(customMessage || '').trim();
+    for (;;) {
+      const { action } = await prompts(
+        {
+          type: 'select',
+          name: 'action',
+          message: `Commit with message:\n${applyPrefix(message, prefix)}\n`,
+          choices: [
+            { title: 'Commit', value: 'commit' },
+            { title: 'Edit message', value: 'edit' },
+            { title: 'Back to options', value: 'back' },
+            { title: 'Cancel', value: 'cancel' },
+          ],
+        },
+        promptOptions,
+      );
+
+      if (action === 'commit') {
+        return message;
+      }
+      if (action === 'edit') {
+        message = await editMessage(repoRoot, message);
+        continue;
+      }
+      if (action === 'back') {
+        break;
+      }
+      return null;
     }
   }
+}
 
-  if (!finalMessage) {
+export async function runCommit({
+  cwd,
+  configPath,
+  dryRun = false,
+  verbose = false,
+  yes = false,
+  all = false,
+  split = false,
+  splitHunks = false,
+  noPrefix = false,
+  overrides,
+}: CommitOptions): Promise<void> {
+  const isRepo = await isGitRepo(cwd);
+  if (!isRepo) {
+    throw new Error('Not a git repository. Run inside a git project.');
+  }
+
+  const repoRoot = await getRepoRoot(cwd);
+  const { config } = await loadConfig(repoRoot, { configPath, cli: overrides });
+  const prefix = noPrefix ? undefined : await resolvePrefix(repoRoot, config);
+
+  const status = await getStatus(repoRoot);
+  if (status.staged.length === 0 && status.unstaged.length === 0) {
+    throw new Error('No changes to commit.');
+  }
+
+  const splitOptions = { repoRoot, config, dryRun, verbose, yes, prefix };
+
+  // Hunk-level split mode (experimental)
+  if (splitHunks) {
+    await runSplitHunksCommit(splitOptions);
+    return;
+  }
+
+  // File-level split mode
+  if (split) {
+    await runSplitCommit(splitOptions);
+    return;
+  }
+
+  await prepareStaging(repoRoot, all, yes);
+
+  const diff = await getStagedDiff(repoRoot);
+  if (!diff.trim()) {
+    throw new Error('No staged changes to commit.');
+  }
+
+  const generate = async () => {
+    const debug = createDebugCollector(verbose);
+    const messages = await withSpinner('Generating commit messages...', () =>
+      generateCommitMessages({
+        settings: config,
+        diff,
+        count: yes ? 1 : config.count,
+        onDebug: debug.onDebug,
+      }),
+    );
+    debug.print();
+    return messages;
+  };
+
+  const finalMessage = yes
+    ? (await generate())[0]
+    : await chooseMessage(repoRoot, generate, prefix);
+
+  if (finalMessage === null) {
+    console.log('Commit cancelled.');
+    return;
+  }
+
+  if (!finalMessage.trim()) {
     throw new Error('Commit message is empty.');
   }
 
-  // Apply prefix to commit message
   const prefixedMessage = applyPrefix(finalMessage, prefix);
-
-  if (!yes) {
-    const { confirm } = await prompts(
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `Commit with message:\n${prefixedMessage}\nProceed?`,
-        initial: true,
-      },
-      promptOptions,
-    );
-
-    if (!confirm) {
-      console.log('Commit cancelled.');
-      return;
-    }
-  }
 
   if (dryRun) {
     console.log(`[dry-run] ${prefixedMessage}`);
