@@ -9,7 +9,7 @@ export default defineConfig({
   format: ['cjs'],
   clean: true,
   sourcemap: true,
-  target: 'node16',
+  target: 'node18',
   define: {
     '__APP_VERSION__': JSON.stringify(packageJson.version),
   },

@@ -1,4 +1,3 @@
-import { fetch } from 'undici';
 import {
   getRepoConfigPath,
   loadGlobalConfig,
