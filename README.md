@@ -116,6 +116,8 @@ Proposed 3 commits:
 Proceed with these 3 commits? (Y/n)
 ```
 
+The AI sees the full diff of every changed file, including new untracked files. Its answer is checked against the real list of changes: unknown paths are ignored, a file listed twice stays in its first commit, and anything the AI left out goes into a separate commit with its own generated message. If a commit fails midway, all commits made during the split are rolled back and your changes stay in the working tree.
+
 Split mode works with other flags:
 
 - `--split --dry-run`: Preview proposed commits without creating them
