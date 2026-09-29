@@ -10,6 +10,7 @@ import {
   runConfigUnset,
 } from './commands/config';
 import { runDoctor } from './commands/doctor';
+import { runHookInstall, runHookMessage, runHookStatus, runHookUninstall } from './commands/hook';
 import { runInit } from './commands/init';
 import { getRepoRoot, isGitRepo } from './git';
 
@@ -167,6 +168,31 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     .command('path')
     .description('Print config file locations')
     .action(() => runConfigPaths(configOptions()));
+
+  const hook = program
+    .command('hook')
+    .description('Generate messages for a plain "git commit" via a prepare-commit-msg hook');
+
+  hook
+    .command('install')
+    .description('Install the hook in this repository')
+    .option('-f, --force', 'Overwrite an existing prepare-commit-msg hook', false)
+    .action((options: { force?: boolean }) => runHookInstall({ cwd }, Boolean(options.force)));
+
+  hook
+    .command('uninstall')
+    .description('Remove the hook')
+    .action(() => runHookUninstall({ cwd }));
+
+  hook
+    .command('status', { isDefault: true })
+    .description('Show whether the hook is installed')
+    .action(() => runHookStatus({ cwd }));
+
+  hook
+    .command('run <messageFile> [source]', { hidden: true })
+    .description('Called by the hook: write a generated message into the file')
+    .action((messageFile: string, source?: string) => runHookMessage({ cwd }, messageFile, source));
 
   program
     .command('doctor')
