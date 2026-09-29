@@ -11,16 +11,24 @@ export interface GitStatus {
 export interface DiffHunk {
   id: string;           // unique identifier: "file:hunkIndex"
   file: string;         // file path
-  hunkIndex: number;    // hunk index within the file
-  header: string;       // @@ -a,b +c,d @@ context
+  hunkIndex: number;    // hunk index within the file (0 = whole-file change without text hunks)
+  wholeFile: boolean;   // binary, mode-only or empty-file change: staged as a whole file
   content: string[];    // lines of the hunk (including @@ line)
   fileHeader: string[]; // diff --git, index, ---, +++ lines
   summary: string;      // first few changed lines for AI context
 }
 
-async function runGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+async function runGit(
+  args: string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await runCommand('git', args, { cwd });
+    // core.quotePath=false keeps non-ASCII paths readable and identical across status/diff/add
+    return await runCommand('git', ['-c', 'core.quotePath=false', ...args], {
+      cwd,
+      env: env ? { ...process.env, ...env } : undefined,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Git command failed';
     const stderr = (error as { stderr?: string } | undefined)?.stderr ?? '';
@@ -43,43 +51,42 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
   }
 }
 
-function extractPath(rawPath: string): string {
-  const trimmed = rawPath.trim();
-  const arrowIndex = trimmed.indexOf('->');
-  if (arrowIndex === -1) {
-    return trimmed;
-  }
-
-  return trimmed.slice(arrowIndex + 2).trim();
-}
-
 function parseStatus(output: string): GitStatus {
   const staged = new Set<string>();
   const unstaged = new Set<string>();
 
-  output
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .forEach((line) => {
-      if (line.startsWith('??')) {
-        const filePath = extractPath(line.slice(2));
-        unstaged.add(filePath);
-        return;
-      }
+  // Porcelain v1 with -z: "XY path\0", renames/copies add "origPath\0" after the new path
+  const entries = output.split('\0');
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 4) {
+      continue;
+    }
 
-      const indexStatus = line[0];
-      const worktreeStatus = line[1];
-      const filePath = extractPath(line.slice(2));
+    const indexStatus = entry[0];
+    const worktreeStatus = entry[1];
+    const filePath = entry.slice(3);
 
-      if (indexStatus && indexStatus !== ' ') {
-        staged.add(filePath);
+    if (indexStatus === 'R' || indexStatus === 'C') {
+      const origPath = entries[++i];
+      if (indexStatus === 'R' && origPath) {
+        staged.add(origPath);
       }
+    }
 
-      if (worktreeStatus && worktreeStatus !== ' ') {
-        unstaged.add(filePath);
-      }
-    });
+    if (indexStatus === '?') {
+      unstaged.add(filePath);
+      continue;
+    }
+
+    if (indexStatus !== ' ') {
+      staged.add(filePath);
+    }
+
+    if (worktreeStatus !== ' ') {
+      unstaged.add(filePath);
+    }
+  }
 
   return {
     staged: Array.from(staged),
@@ -88,7 +95,7 @@ function parseStatus(output: string): GitStatus {
 }
 
 export async function getStatus(repoRoot: string): Promise<GitStatus> {
-  const result = await runGit(['status', '--porcelain=v1'], repoRoot);
+  const result = await runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], repoRoot);
   return parseStatus(result.stdout);
 }
 
@@ -108,31 +115,98 @@ export async function stageFiles(repoRoot: string, files: string[]): Promise<voi
 }
 
 export async function unstageAll(repoRoot: string): Promise<void> {
-  await runGit(['reset', 'HEAD'], repoRoot);
+  await runGit(['reset', '-q', 'HEAD'], repoRoot);
 }
 
-export async function getFullDiff(repoRoot: string): Promise<string> {
-  // -U8 shows 8 lines of context (default is 3)
-  const result = await runGit(['diff', '-U8', 'HEAD'], repoRoot);
-  return result.stdout;
+export async function hasHead(repoRoot: string): Promise<boolean> {
+  try {
+    await runGit(['rev-parse', '--verify', '-q', 'HEAD'], repoRoot);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export async function getFullDiffMinimalContext(repoRoot: string): Promise<string> {
-  // -U1 for more granular hunks (better for hunk-level split)
-  const result = await runGit(['diff', '-U1', 'HEAD'], repoRoot);
-  return result.stdout;
+export interface WorkingTreeDiff {
+  files: string[];
+  diff: string;
 }
 
-export async function getDiffForFiles(repoRoot: string, files: string[]): Promise<string> {
-  if (files.length === 0) return '';
-  // -U8 shows 8 lines of context (default is 3)
-  const result = await runGit(['diff', '-U8', 'HEAD', '--', ...files], repoRoot);
-  return result.stdout;
+/**
+ * Diff of every change in the working tree against HEAD, including untracked files,
+ * without touching the real index. Renames are shown as delete + add so that every
+ * path in the diff can be staged on its own.
+ */
+export async function getWorkingTreeDiff(
+  repoRoot: string,
+  contextLines: number,
+): Promise<WorkingTreeDiff> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aicmt-index-'));
+  const env = { GIT_INDEX_FILE: path.join(tempDir, 'index') };
+
+  try {
+    await runGit(['read-tree', 'HEAD'], repoRoot, env);
+    await runGit(['add', '-A'], repoRoot, env);
+
+    const names = await runGit(
+      ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD'],
+      repoRoot,
+      env,
+    );
+    const diff = await runGit(
+      ['diff', '--cached', '--no-renames', `-U${contextLines}`, 'HEAD'],
+      repoRoot,
+      env,
+    );
+
+    return {
+      files: names.stdout.split('\0').filter(Boolean),
+      diff: diff.stdout,
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/** Keeps only the diff blocks of the given files. */
+export function filterDiffByFiles(diff: string, files: string[]): string {
+  const wanted = new Set(files);
+  const kept: string[] = [];
+  let keep = false;
+
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      keep = wanted.has(extractFileFromDiffHeader(line));
+    }
+    if (keep) {
+      kept.push(line);
+    }
+  }
+
+  return kept.join('\n');
+}
+
+function stripDiffPathPrefix(raw: string): string | null {
+  const value = raw.replace(/\t$/, '');
+  if (value === '/dev/null') {
+    return null;
+  }
+  return value.replace(/^[ab]\//, '');
 }
 
 function extractFileFromDiffHeader(line: string): string {
   // "diff --git a/path/to/file b/path/to/file" -> "path/to/file"
-  const match = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+  // Both sides are equal with --no-renames, so split the rest in half.
+  const rest = line.slice('diff --git '.length);
+  const half = (rest.length - 1) / 2;
+  if (Number.isInteger(half) && rest[half] === ' ') {
+    const left = rest.slice(0, half);
+    const right = rest.slice(half + 1);
+    if (left.slice(2) === right.slice(2)) {
+      return right.slice(2);
+    }
+  }
+  const match = rest.match(/^a\/(.+) b\/(.+)$/);
   return match ? match[2] : '';
 }
 
@@ -153,7 +227,6 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
   let currentFileHeader: string[] = [];
   let currentHunkIndex = 0;
   let currentHunkLines: string[] = [];
-  let currentHunkHeader = '';
   let inHunk = false;
 
   const flushHunk = () => {
@@ -162,20 +235,35 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
         id: `${currentFile}:${currentHunkIndex}`,
         file: currentFile,
         hunkIndex: currentHunkIndex,
-        header: currentHunkHeader,
+        wholeFile: false,
         content: [...currentHunkLines],
         fileHeader: [...currentFileHeader],
         summary: extractHunkSummary(currentHunkLines),
       });
     }
     currentHunkLines = [];
-    currentHunkHeader = '';
+  };
+
+  // Files without text hunks (binary, mode change, empty file) become one whole-file unit
+  const flushFile = () => {
+    flushHunk();
+    if (currentFile && currentHunkIndex === 0) {
+      hunks.push({
+        id: `${currentFile}:0`,
+        file: currentFile,
+        hunkIndex: 0,
+        wholeFile: true,
+        content: [],
+        fileHeader: [...currentFileHeader],
+        summary: currentFileHeader.slice(1).join('\n'),
+      });
+    }
   };
 
   for (const line of lines) {
     // New file
     if (line.startsWith('diff --git ')) {
-      flushHunk();
+      flushFile();
       currentFile = extractFileFromDiffHeader(line);
       currentFileHeader = [line];
       currentHunkIndex = 0;
@@ -183,18 +271,23 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
       continue;
     }
 
-    // File header lines (index, ---, +++)
-    if (!inHunk && (line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ') ||
-        line.startsWith('new file mode') || line.startsWith('deleted file mode') ||
-        line.startsWith('old mode') || line.startsWith('new mode'))) {
-      currentFileHeader.push(line);
+    // File header lines (index, ---, +++, modes, binary markers)
+    if (!inHunk && !line.startsWith('@@')) {
+      if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+        const filePath = stripDiffPathPrefix(line.slice(4));
+        if (filePath) {
+          currentFile = filePath;
+        }
+      }
+      if (currentFile) {
+        currentFileHeader.push(line);
+      }
       continue;
     }
 
     // Hunk header
     if (line.startsWith('@@')) {
       flushHunk();
-      currentHunkHeader = line;
       currentHunkLines = [line];
       currentHunkIndex++;
       inHunk = true;
@@ -207,7 +300,7 @@ export function parseDiffHunks(diff: string): DiffHunk[] {
     }
   }
 
-  flushHunk();
+  flushFile();
   return hunks;
 }
 
@@ -224,7 +317,7 @@ export function buildPatchFromHunks(hunks: DiffHunk[]): string {
 
   const patchParts: string[] = [];
 
-  for (const [file, fileHunks] of byFile) {
+  for (const fileHunks of byFile.values()) {
     // Sort hunks by index to maintain order
     fileHunks.sort((a, b) => a.hunkIndex - b.hunkIndex);
 
@@ -250,7 +343,7 @@ export async function applyPatch(repoRoot: string, patch: string): Promise<void>
 
   try {
     // Apply patch to index (staging area) only
-    await runGit(['apply', '--cached', '--unidiff-zero', tempPath], repoRoot);
+    await runGit(['apply', '--cached', tempPath], repoRoot);
   } finally {
     try {
       await fs.unlink(tempPath);
@@ -282,10 +375,6 @@ export async function commitWithMessage(repoRoot: string, message: string): Prom
   try {
     await runGit(['commit', '-F', tempPath], repoRoot);
   } finally {
-    try {
-      await fs.unlink(tempPath);
-    } catch (error) {
-      // Ignore cleanup errors.
-    }
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

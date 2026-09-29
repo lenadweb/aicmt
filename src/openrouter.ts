@@ -11,6 +11,8 @@ interface OpenRouterResponse {
 const LARGE_NEW_FILE_LINE_LIMIT = 400;
 const LARGE_NEW_FILE_HEAD_LINES = 120;
 const LARGE_NEW_FILE_TAIL_LINES = 60;
+const SPLIT_TOKENS_PER_ITEM = 40;
+const SPLIT_MAX_TOKENS_CAP = 8000;
 
 function stripCodeFences(text: string): string {
   const trimmed = text.trim();
@@ -21,22 +23,50 @@ function stripCodeFences(text: string): string {
   return trimmed.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
 }
 
-function parseJsonArray(text: string): string[] | null {
+/**
+ * Parses a JSON array from a model reply, tolerating code fences, surrounding prose
+ * and a wrapper object like {"commits": [...]}.
+ */
+function parseJsonArrayLoose(text: string): unknown[] | null {
   const cleaned = stripCodeFences(text);
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (!Array.isArray(parsed)) {
-      return null;
+  const candidates = [cleaned];
+  const start = cleaned.indexOf('[');
+  const end = cleaned.lastIndexOf(']');
+  if (start !== -1 && end > start) {
+    candidates.push(cleaned.slice(start, end + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+      if (parsed && typeof parsed === 'object') {
+        const arrays = Object.values(parsed).filter(Array.isArray);
+        if (arrays.length === 1) {
+          return arrays[0] as unknown[];
+        }
+      }
+    } catch {
+      // try next candidate
     }
+  }
 
-    const strings = parsed
-      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
-      .filter(Boolean);
+  return null;
+}
 
-    return strings.length ? strings : null;
-  } catch (error) {
+function parseJsonArray(text: string): string[] | null {
+  const parsed = parseJsonArrayLoose(text);
+  if (!parsed) {
     return null;
   }
+
+  const strings = parsed
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter(Boolean);
+
+  return strings.length ? strings : null;
 }
 
 function parseLines(text: string): string[] {
@@ -192,6 +222,77 @@ export interface OpenRouterDebugInfo {
   status?: number;
 }
 
+interface CompletionRequest {
+  apiKey: string;
+  model: string;
+  systemContent: string;
+  prompt: string;
+  temperature: number;
+  maxTokens: number;
+  onDebug?: (info: OpenRouterDebugInfo) => void;
+}
+
+/** Sends one chat completion request and returns the text of the first choice. */
+async function requestCompletion({
+  apiKey,
+  model,
+  systemContent,
+  prompt,
+  temperature,
+  maxTokens,
+  onDebug,
+}: CompletionRequest): Promise<string> {
+  const payload: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: 'system', content: systemContent },
+      { role: 'user', content: prompt },
+    ],
+    temperature,
+    max_tokens: maxTokens,
+  };
+
+  onDebug?.({ stage: 'request', prompt, payload });
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://aicmt.local',
+      'X-Title': 'aicmt',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  onDebug?.({
+    stage: 'response',
+    prompt,
+    payload,
+    responseText,
+    status: response.status,
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
+  }
+
+  let data: OpenRouterResponse;
+  try {
+    data = JSON.parse(responseText) as OpenRouterResponse;
+  } catch {
+    throw new Error('OpenRouter returned invalid JSON');
+  }
+
+  const content = data.choices?.[0]?.message?.content ?? '';
+  if (!content) {
+    throw new Error('OpenRouter returned empty content');
+  }
+
+  return content;
+}
+
 export async function generateCommitMessages({
   apiKey,
   model,
@@ -218,62 +319,15 @@ export async function generateCommitMessages({
   ].join('\n');
   const prompt = diffText;
 
-  const payload: Record<string, unknown> = {
+  const content = await requestCompletion({
+    apiKey,
     model,
-    messages: [
-      {
-        role: 'system',
-        content: systemContent,
-      },
-      { role: 'user', content: prompt },
-    ],
-  };
-
-  if (typeof temperature === 'number') {
-    payload.temperature = temperature;
-  }
-
-  if (typeof maxTokens === 'number') {
-    payload.max_tokens = maxTokens;
-  }
-
-  onDebug?.({ stage: 'request', prompt, payload });
-
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://aicmt.local',
-      'X-Title': 'aicmt',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const responseText = await response.text();
-  onDebug?.({
-    stage: 'response',
+    systemContent,
     prompt,
-    payload,
-    responseText,
-    status: response.status,
+    temperature,
+    maxTokens,
+    onDebug,
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
-  }
-
-  let data: OpenRouterResponse;
-  try {
-    data = JSON.parse(responseText) as OpenRouterResponse;
-  } catch (error) {
-    throw new Error('OpenRouter returned invalid JSON');
-  }
-  const content = data.choices?.[0]?.message?.content ?? '';
-
-  if (!content) {
-    throw new Error('OpenRouter returned empty content');
-  }
 
   const jsonMessages = parseJsonArray(content);
   if (jsonMessages) {
@@ -285,34 +339,101 @@ export async function generateCommitMessages({
 }
 
 function parseCommitGroups(text: string): CommitGroup[] | null {
-  const cleaned = stripCodeFences(text);
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (!Array.isArray(parsed)) {
-      return null;
-    }
-
-    const groups: CommitGroup[] = [];
-    for (const item of parsed) {
-      if (
-        typeof item === 'object' &&
-        item !== null &&
-        Array.isArray(item.files) &&
-        typeof item.message === 'string' &&
-        item.files.length > 0 &&
-        item.message.trim().length > 0
-      ) {
-        groups.push({
-          files: item.files.filter((f: unknown) => typeof f === 'string'),
-          message: item.message.trim(),
-        });
-      }
-    }
-
-    return groups.length > 0 ? groups : null;
-  } catch (error) {
+  const parsed = parseJsonArrayLoose(text);
+  if (!parsed) {
     return null;
   }
+
+  const groups: CommitGroup[] = [];
+  for (const item of parsed as Array<{ files?: unknown; message?: unknown }>) {
+    if (
+      typeof item === 'object' &&
+      item !== null &&
+      Array.isArray(item.files) &&
+      typeof item.message === 'string' &&
+      item.message.trim().length > 0
+    ) {
+      groups.push({
+        files: item.files.filter((f: unknown): f is string => typeof f === 'string'),
+        message: item.message.trim(),
+      });
+    }
+  }
+
+  return groups.length > 0 ? groups : null;
+}
+
+function normalizeModelPath(raw: string): string {
+  let value = raw.trim().replace(/^["'`]|["'`]$/g, '');
+  if (value.startsWith('./')) {
+    value = value.slice(2);
+  }
+  return value;
+}
+
+/**
+ * Maps model-returned ids onto the known set: unknown ids are dropped, an id claimed by
+ * several groups stays in the first one, empty groups are removed. Ids the model left out
+ * are returned separately so the caller can commit them with their own message.
+ */
+export function reconcileGroups<T extends { message: string }>(
+  groups: T[],
+  getIds: (group: T) => string[],
+  setIds: (group: T, ids: string[]) => T,
+  knownIds: string[],
+  normalizeId: (id: string) => string[] = (id) => [id],
+): { groups: T[]; leftover: string[] } {
+  const known = new Set(knownIds);
+  const assigned = new Set<string>();
+  const result: T[] = [];
+
+  for (const group of groups) {
+    const ids: string[] = [];
+    for (const raw of getIds(group)) {
+      const id = normalizeId(raw).find((candidate) => known.has(candidate));
+      if (id && !assigned.has(id)) {
+        assigned.add(id);
+        ids.push(id);
+      }
+    }
+    if (ids.length > 0) {
+      result.push(setIds(group, ids));
+    }
+  }
+
+  return {
+    groups: result,
+    leftover: knownIds.filter((id) => !assigned.has(id)),
+  };
+}
+
+export function reconcileFileGroups(
+  groups: CommitGroup[],
+  files: string[],
+): { groups: CommitGroup[]; leftover: string[] } {
+  return reconcileGroups(
+    groups,
+    (group) => group.files,
+    (group, ids) => ({ ...group, files: ids }),
+    files,
+    (raw) => {
+      const value = normalizeModelPath(raw);
+      return [value, value.replace(/^[ab]\//, '')];
+    },
+  );
+}
+
+export function reconcileHunkGroups(
+  groups: HunkCommitGroup[],
+  hunkIds: string[],
+): { groups: HunkCommitGroup[]; leftover: string[] } {
+  return reconcileGroups(
+    groups,
+    (group) => group.hunkIds,
+    (group, ids) => ({ ...group, hunkIds: ids }),
+    hunkIds,
+    (raw) => [normalizeModelPath(raw)],
+  );
 }
 
 export async function generateCommitGroups({
@@ -338,7 +459,9 @@ export async function generateCommitGroups({
     '[{"files": ["file1.ts", "file2.ts"], "message": "commit message"}, ...]',
     '',
     'Rules:',
-    '- Each file should appear in exactly one group',
+    '- Use file paths exactly as they appear in the "Changed files" list',
+    '- Each file must appear in exactly one group; do not skip any file',
+    '- Base each commit message only on the diff of the files in that group',
     '- Group related changes together (e.g., a feature and its tests)',
     '- Each commit message must follow the instructions below',
     '- Order commits logically (e.g., refactoring before new features)',
@@ -357,109 +480,51 @@ export async function generateCommitGroups({
     diffText,
   ].join('\n');
 
-  const payload: Record<string, unknown> = {
+  // Structured output grows with the number of files: leave room so the JSON is not cut off
+  const content = await requestCompletion({
+    apiKey,
     model,
-    messages: [
-      {
-        role: 'system',
-        content: systemContent,
-      },
-      { role: 'user', content: prompt },
-    ],
-  };
-
-  if (typeof temperature === 'number') {
-    payload.temperature = temperature;
-  }
-
-  // Use higher max_tokens for split mode since we need structured JSON output
-  const splitMaxTokens = Math.max(maxTokens * 3, 500);
-  payload.max_tokens = splitMaxTokens;
-
-  onDebug?.({ stage: 'request', prompt, payload });
-
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://aicmt.local',
-      'X-Title': 'aicmt',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const responseText = await response.text();
-  onDebug?.({
-    stage: 'response',
+    systemContent,
     prompt,
-    payload,
-    responseText,
-    status: response.status,
+    temperature,
+    maxTokens: Math.min(
+      SPLIT_MAX_TOKENS_CAP,
+      Math.max(maxTokens * 3, 1000) + files.length * SPLIT_TOKENS_PER_ITEM,
+    ),
+    onDebug,
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
-  }
-
-  let data: OpenRouterResponse;
-  try {
-    data = JSON.parse(responseText) as OpenRouterResponse;
-  } catch (error) {
-    throw new Error('OpenRouter returned invalid JSON');
-  }
-  const content = data.choices?.[0]?.message?.content ?? '';
-
-  if (!content) {
-    throw new Error('OpenRouter returned empty content');
-  }
 
   const groups = parseCommitGroups(content);
   if (!groups || groups.length === 0) {
     throw new Error('Failed to parse commit groups from AI response');
   }
 
-  // Validate that all files are accounted for
-  const groupedFiles = new Set(groups.flatMap((g) => g.files));
-  const missingFiles = files.filter((f) => !groupedFiles.has(f));
-
-  if (missingFiles.length > 0) {
-    // Add missing files to the last group
-    groups[groups.length - 1].files.push(...missingFiles);
-  }
-
   return groups;
 }
 
 function parseHunkGroups(text: string): HunkCommitGroup[] | null {
-  const cleaned = stripCodeFences(text);
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (!Array.isArray(parsed)) {
-      return null;
-    }
-
-    const groups: HunkCommitGroup[] = [];
-    for (const item of parsed) {
-      if (
-        typeof item === 'object' &&
-        item !== null &&
-        Array.isArray(item.hunkIds) &&
-        typeof item.message === 'string' &&
-        item.hunkIds.length > 0 &&
-        item.message.trim().length > 0
-      ) {
-        groups.push({
-          hunkIds: item.hunkIds.filter((id: unknown) => typeof id === 'string'),
-          message: item.message.trim(),
-        });
-      }
-    }
-
-    return groups.length > 0 ? groups : null;
-  } catch (error) {
+  const parsed = parseJsonArrayLoose(text);
+  if (!parsed) {
     return null;
   }
+
+  const groups: HunkCommitGroup[] = [];
+  for (const item of parsed as Array<{ hunkIds?: unknown; message?: unknown }>) {
+    if (
+      typeof item === 'object' &&
+      item !== null &&
+      Array.isArray(item.hunkIds) &&
+      typeof item.message === 'string' &&
+      item.message.trim().length > 0
+    ) {
+      groups.push({
+        hunkIds: item.hunkIds.filter((id: unknown): id is string => typeof id === 'string'),
+        message: item.message.trim(),
+      });
+    }
+  }
+
+  return groups.length > 0 ? groups : null;
 }
 
 export async function generateCommitGroupsFromHunks({
@@ -486,7 +551,9 @@ export async function generateCommitGroupsFromHunks({
     '[{"hunkIds": ["file.ts:1", "file.ts:2"], "message": "commit message"}, ...]',
     '',
     'Rules:',
-    '- Each hunkId should appear in exactly one group',
+    '- Use hunk ids exactly as they appear in the "Available hunks" list',
+    '- Each hunkId must appear in exactly one group; do not skip any hunk',
+    '- Base each commit message only on the hunks in that group',
     '- Group related changes together even if they are in different files',
     '- IMPORTANT: If hunks within the same file are related, keep them in the same commit',
     '- Each commit message must follow the instructions below',
@@ -510,83 +577,24 @@ export async function generateCommitGroupsFromHunks({
     diffText,
   ].join('\n');
 
-  const payload: Record<string, unknown> = {
+  // Structured output grows with the number of hunks: leave room so the JSON is not cut off
+  const content = await requestCompletion({
+    apiKey,
     model,
-    messages: [
-      {
-        role: 'system',
-        content: systemContent,
-      },
-      { role: 'user', content: prompt },
-    ],
-  };
-
-  if (typeof temperature === 'number') {
-    payload.temperature = temperature;
-  }
-
-  // Use higher max_tokens for hunk split mode
-  const splitMaxTokens = Math.max(maxTokens * 4, 800);
-  payload.max_tokens = splitMaxTokens;
-
-  onDebug?.({ stage: 'request', prompt, payload });
-
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://aicmt.local',
-      'X-Title': 'aicmt',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const responseText = await response.text();
-  onDebug?.({
-    stage: 'response',
+    systemContent,
     prompt,
-    payload,
-    responseText,
-    status: response.status,
+    temperature,
+    maxTokens: Math.min(
+      SPLIT_MAX_TOKENS_CAP,
+      Math.max(maxTokens * 4, 1000) + hunks.length * SPLIT_TOKENS_PER_ITEM,
+    ),
+    onDebug,
   });
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter error: ${response.status} ${responseText}`);
-  }
-
-  let data: OpenRouterResponse;
-  try {
-    data = JSON.parse(responseText) as OpenRouterResponse;
-  } catch (error) {
-    throw new Error('OpenRouter returned invalid JSON');
-  }
-  const content = data.choices?.[0]?.message?.content ?? '';
-
-  if (!content) {
-    throw new Error('OpenRouter returned empty content');
-  }
 
   const groups = parseHunkGroups(content);
   if (!groups || groups.length === 0) {
     throw new Error('Failed to parse hunk groups from AI response');
   }
 
-  // Validate that all hunks are accounted for
-  const allHunkIds = new Set(hunks.map((h) => h.id));
-  const groupedHunkIds = new Set(groups.flatMap((g) => g.hunkIds));
-  const missingHunkIds = [...allHunkIds].filter((id) => !groupedHunkIds.has(id));
-
-  if (missingHunkIds.length > 0) {
-    // Add missing hunks to the last group
-    groups[groups.length - 1].hunkIds.push(...missingHunkIds);
-  }
-
-  // Remove any hunk IDs that don't exist
-  for (const group of groups) {
-    group.hunkIds = group.hunkIds.filter((id) => allHunkIds.has(id));
-  }
-
-  // Filter out empty groups
-  return groups.filter((g) => g.hunkIds.length > 0);
+  return groups;
 }

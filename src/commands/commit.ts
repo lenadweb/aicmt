@@ -5,12 +5,13 @@ import {
   buildPatchFromHunks,
   commitWithMessage,
   DiffHunk,
+  filterDiffByFiles,
   getCurrentHead,
-  getFullDiff,
-  getFullDiffMinimalContext,
   getRepoRoot,
   getStagedDiff,
   getStatus,
+  getWorkingTreeDiff,
+  hasHead,
   isGitRepo,
   parseDiffHunks,
   resetToCommit,
@@ -25,6 +26,8 @@ import {
   generateCommitMessages,
   HunkCommitGroup,
   OpenRouterDebugInfo,
+  reconcileFileGroups,
+  reconcileHunkGroups,
 } from '../openrouter';
 
 const promptOptions = {
@@ -45,20 +48,61 @@ export interface CommitOptions {
   model?: string;
 }
 
+type SplitConfig = {
+  openrouterApiKey: string;
+  model: string;
+  instructions: string;
+  temperature: number;
+  maxTokens: number;
+};
+
 interface SplitCommitOptions {
   repoRoot: string;
-  config: {
-    openrouterApiKey: string;
-    model: string;
-    instructions: string;
-    temperature: number;
-    maxTokens: number;
-  };
-  status: { staged: string[]; unstaged: string[] };
+  config: SplitConfig;
   dryRun: boolean;
   verbose: boolean;
   yes: boolean;
   prefix?: string;
+}
+
+interface DebugCollector {
+  onDebug: (info: OpenRouterDebugInfo) => void;
+  print: () => void;
+}
+
+function createDebugCollector(verbose: boolean): DebugCollector {
+  const debugInfo: {
+    request?: OpenRouterDebugInfo;
+    response?: OpenRouterDebugInfo;
+  } = {};
+
+  return {
+    onDebug: (info) => {
+      if (info.stage === 'request') {
+        debugInfo.request = info;
+      } else {
+        debugInfo.response = info;
+      }
+    },
+    print: () => {
+      if (!verbose) {
+        return;
+      }
+
+      if (debugInfo.request) {
+        console.log('[aicmt] AI request payload:');
+        console.log(JSON.stringify(debugInfo.request.payload, null, 2));
+        console.log('[aicmt] AI request prompt:');
+        console.log(debugInfo.request.prompt);
+      }
+
+      if (debugInfo.response) {
+        const responseStatus = debugInfo.response.status ?? 'unknown';
+        console.log(`[aicmt] AI response (status ${responseStatus}):`);
+        console.log(debugInfo.response.responseText ?? '');
+      }
+    },
+  };
 }
 
 function formatCommitGroups(groups: CommitGroup[]): string {
@@ -70,129 +114,10 @@ function formatCommitGroups(groups: CommitGroup[]): string {
     .join('\n\n');
 }
 
-async function runSplitCommit({
-  repoRoot,
-  config,
-  status,
-  dryRun,
-  verbose,
-  yes,
-  prefix,
-}: SplitCommitOptions): Promise<void> {
-  // Collect all changed files
-  const allFiles = [...new Set([...status.staged, ...status.unstaged])];
-
-  if (allFiles.length === 0) {
-    throw new Error('No changes to commit.');
-  }
-
-  // Ensure we have a clean staging area to work with
-  if (status.staged.length > 0) {
-    await unstageAll(repoRoot);
-  }
-
-  // Get the full diff of all changes
-  const diff = await getFullDiff(repoRoot);
-
-  console.log(`Analyzing ${allFiles.length} changed files...`);
-
-  const debugInfo: {
-    request?: OpenRouterDebugInfo;
-    response?: OpenRouterDebugInfo;
-  } = {};
-
-  // Ask AI to group the files into logical commits
-  const groups = await generateCommitGroups({
-    apiKey: config.openrouterApiKey,
-    model: config.model,
-    instructions: config.instructions,
-    diff,
-    files: allFiles,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onDebug: (info) => {
-      if (info.stage === 'request') {
-        debugInfo.request = info;
-      } else {
-        debugInfo.response = info;
-      }
-    },
-  });
-
-  if (verbose) {
-    if (debugInfo.request) {
-      console.log('[aicmt] AI request payload:');
-      console.log(JSON.stringify(debugInfo.request.payload, null, 2));
-      console.log('[aicmt] AI request prompt:');
-      console.log(debugInfo.request.prompt);
-    }
-
-    if (debugInfo.response) {
-      const responseStatus = debugInfo.response.status ?? 'unknown';
-      console.log(`[aicmt] AI response (status ${responseStatus}):`);
-      console.log(debugInfo.response.responseText ?? '');
-    }
-  }
-
-  console.log(`\nProposed ${groups.length} commits:\n`);
-  console.log(formatCommitGroups(groups));
-
-  if (!yes) {
-    const { confirm } = await prompts(
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `\nProceed with these ${groups.length} commits?`,
-        initial: true,
-      },
-      promptOptions,
-    );
-
-    if (!confirm) {
-      console.log('Split commit cancelled.');
-      return;
-    }
-  }
-
-  if (dryRun) {
-    console.log('\n[dry-run] Would create the following commits:');
-    for (const group of groups) {
-      const prefixedMessage = applyPrefix(group.message, prefix);
-      console.log(`  - ${prefixedMessage} (${group.files.length} files)`);
-    }
-    return;
-  }
-
-  // Create commits one by one
-  let createdCount = 0;
-  for (const group of groups) {
-    try {
-      // Stage only the files for this commit
-      await stageFiles(repoRoot, group.files);
-
-      // Apply prefix and create the commit
-      const prefixedMessage = applyPrefix(group.message, prefix);
-      await commitWithMessage(repoRoot, prefixedMessage);
-      createdCount++;
-      console.log(`Commit ${createdCount}/${groups.length}: ${prefixedMessage}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Failed to create commit: ${message}`);
-      console.error(`Files: ${group.files.join(', ')}`);
-      throw error;
-    }
-  }
-
-  console.log(`\nSuccessfully created ${createdCount} commits.`);
-}
-
-function formatHunkGroups(groups: HunkCommitGroup[], hunksMap: Map<string, DiffHunk>): string {
+function formatHunkGroups(groups: HunkCommitGroup[]): string {
   return groups
     .map((group, index) => {
-      const hunkDetails = group.hunkIds.map((id) => {
-        const hunk = hunksMap.get(id);
-        return hunk ? `    - ${id}` : `    - ${id} (unknown)`;
-      }).join('\n');
+      const hunkDetails = group.hunkIds.map((id) => `    - ${id}`).join('\n');
       return `  ${index + 1}. ${group.message}\n${hunkDetails}`;
     })
     .join('\n\n');
@@ -205,54 +130,202 @@ function applyPrefix(message: string, prefix?: string): string {
   return `${prefix}${message}`;
 }
 
-async function runSplitHunksCommit({
+async function ensureHead(repoRoot: string): Promise<void> {
+  if (!(await hasHead(repoRoot))) {
+    throw new Error('Split mode needs at least one existing commit. Create the initial commit first.');
+  }
+}
+
+/** Commit message for changes the model left out of its grouping. */
+async function generateLeftoverMessage(
+  config: SplitConfig,
+  diff: string,
+  verbose: boolean,
+): Promise<string> {
+  const debug = createDebugCollector(verbose);
+  const messages = await generateCommitMessages({
+    apiKey: config.openrouterApiKey,
+    model: config.model,
+    instructions: config.instructions,
+    diff,
+    temperature: config.temperature,
+    maxTokens: config.maxTokens,
+    onDebug: debug.onDebug,
+  });
+  debug.print();
+  return messages[0];
+}
+
+async function confirmSplit(count: number, yes: boolean): Promise<boolean> {
+  if (yes) {
+    return true;
+  }
+
+  const { confirm } = await prompts(
+    {
+      type: 'confirm',
+      name: 'confirm',
+      message: `\nProceed with these ${count} commits?`,
+      initial: true,
+    },
+    promptOptions,
+  );
+
+  return Boolean(confirm);
+}
+
+/**
+ * Runs the commit steps; if any of them fails, resets back to the original HEAD
+ * (mixed reset: the working tree is untouched) and rethrows.
+ */
+async function commitGroupsWithRollback<T extends { message: string }>(
+  repoRoot: string,
+  groups: T[],
+  prefix: string | undefined,
+  stageGroup: (group: T) => Promise<void>,
+): Promise<void> {
+  const originalHead = await getCurrentHead(repoRoot);
+  let createdCount = 0;
+
+  // Start from a clean index: every group is staged from scratch
+  await unstageAll(repoRoot);
+
+  try {
+    for (const group of groups) {
+      await stageGroup(group);
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      await commitWithMessage(repoRoot, prefixedMessage);
+      createdCount++;
+      console.log(`Commit ${createdCount}/${groups.length}: ${prefixedMessage}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`\nError during split: ${message}`);
+
+    try {
+      await resetToCommit(repoRoot, originalHead);
+      if (createdCount > 0) {
+        console.error(`Rolled back ${createdCount} commits. Your changes are left in the working tree.`);
+      }
+    } catch (rollbackError) {
+      const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : 'Unknown';
+      console.error(`Rollback failed: ${rollbackMsg}`);
+      console.error(`Manual recovery: git reset --mixed ${originalHead}`);
+    }
+
+    throw error;
+  }
+
+  console.log(`\nSuccessfully created ${createdCount} commits.`);
+
+  const remaining = await getStatus(repoRoot);
+  const remainingFiles = [...new Set([...remaining.staged, ...remaining.unstaged])];
+  if (remainingFiles.length > 0) {
+    console.warn(`Warning: ${remainingFiles.length} changed files were not committed:`);
+    remainingFiles.forEach((file) => console.warn(`  - ${file}`));
+  }
+}
+
+async function runSplitCommit({
   repoRoot,
   config,
-  status,
   dryRun,
   verbose,
   yes,
   prefix,
 }: SplitCommitOptions): Promise<void> {
-  // Collect all changed files
-  const allFiles = [...new Set([...status.staged, ...status.unstaged])];
+  await ensureHead(repoRoot);
 
-  if (allFiles.length === 0) {
+  // Diff and file list come from the same snapshot (untracked files included),
+  // so the model sees the content of every file it is asked to group
+  const { files, diff } = await getWorkingTreeDiff(repoRoot, 8);
+
+  if (files.length === 0) {
     throw new Error('No changes to commit.');
   }
 
-  // Ensure we have a clean staging area
-  if (status.staged.length > 0) {
-    await unstageAll(repoRoot);
+  console.log(`Analyzing ${files.length} changed files...`);
+
+  const debug = createDebugCollector(verbose);
+
+  // Ask AI to group the files into logical commits
+  const rawGroups = await generateCommitGroups({
+    apiKey: config.openrouterApiKey,
+    model: config.model,
+    instructions: config.instructions,
+    diff,
+    files,
+    temperature: config.temperature,
+    maxTokens: config.maxTokens,
+    onDebug: debug.onDebug,
+  });
+  debug.print();
+
+  const { groups, leftover } = reconcileFileGroups(rawGroups, files);
+
+  if (leftover.length > 0) {
+    console.log(`AI skipped ${leftover.length} files, generating a separate commit for them...`);
+    const message = await generateLeftoverMessage(
+      config,
+      filterDiffByFiles(diff, leftover),
+      verbose,
+    );
+    groups.push({ files: leftover, message });
   }
 
-  // Get diff with minimal context for granular hunk detection
-  const diffForHunks = await getFullDiffMinimalContext(repoRoot);
-  const hunks = parseDiffHunks(diffForHunks);
+  console.log(`\nProposed ${groups.length} commits:\n`);
+  console.log(formatCommitGroups(groups));
 
-  // Get full diff with more context for AI understanding
-  const fullDiff = await getFullDiff(repoRoot);
+  if (!(await confirmSplit(groups.length, yes))) {
+    console.log('Split commit cancelled.');
+    return;
+  }
+
+  if (dryRun) {
+    console.log('\n[dry-run] Would create the following commits:');
+    for (const group of groups) {
+      const prefixedMessage = applyPrefix(group.message, prefix);
+      console.log(`  - ${prefixedMessage} (${group.files.length} files)`);
+    }
+    return;
+  }
+
+  await commitGroupsWithRollback(repoRoot, groups, prefix, (group) =>
+    stageFiles(repoRoot, group.files),
+  );
+}
+
+async function runSplitHunksCommit({
+  repoRoot,
+  config,
+  dryRun,
+  verbose,
+  yes,
+  prefix,
+}: SplitCommitOptions): Promise<void> {
+  await ensureHead(repoRoot);
+
+  // Minimal context for granular hunks, full context for AI understanding
+  const hunkDiff = await getWorkingTreeDiff(repoRoot, 1);
+  const hunks = parseDiffHunks(hunkDiff.diff);
+  const { diff: fullDiff } = await getWorkingTreeDiff(repoRoot, 8);
 
   if (hunks.length === 0) {
-    throw new Error('No hunks found in diff.');
+    throw new Error('No changes to commit.');
   }
 
-  // Create a map for quick lookup
   const hunksMap = new Map<string, DiffHunk>();
   for (const hunk of hunks) {
     hunksMap.set(hunk.id, hunk);
   }
 
-  console.log(`Analyzing ${hunks.length} hunks across ${allFiles.length} files...`);
+  console.log(`Analyzing ${hunks.length} hunks across ${hunkDiff.files.length} files...`);
   console.log('(experimental hunk-level split mode)\n');
 
-  const debugInfo: {
-    request?: OpenRouterDebugInfo;
-    response?: OpenRouterDebugInfo;
-  } = {};
+  const debug = createDebugCollector(verbose);
 
   // Ask AI to group hunks into logical commits
-  const groups = await generateCommitGroupsFromHunks({
+  const rawGroups = await generateCommitGroupsFromHunks({
     apiKey: config.openrouterApiKey,
     model: config.model,
     instructions: config.instructions,
@@ -260,48 +333,30 @@ async function runSplitHunksCommit({
     fullDiff,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
-    onDebug: (info) => {
-      if (info.stage === 'request') {
-        debugInfo.request = info;
-      } else {
-        debugInfo.response = info;
-      }
-    },
+    onDebug: debug.onDebug,
   });
+  debug.print();
 
-  if (verbose) {
-    if (debugInfo.request) {
-      console.log('[aicmt] AI request payload:');
-      console.log(JSON.stringify(debugInfo.request.payload, null, 2));
-      console.log('[aicmt] AI request prompt:');
-      console.log(debugInfo.request.prompt);
-    }
+  const { groups, leftover } = reconcileHunkGroups(rawGroups, [...hunksMap.keys()]);
 
-    if (debugInfo.response) {
-      const responseStatus = debugInfo.response.status ?? 'unknown';
-      console.log(`[aicmt] AI response (status ${responseStatus}):`);
-      console.log(debugInfo.response.responseText ?? '');
-    }
+  if (leftover.length > 0) {
+    console.log(`AI skipped ${leftover.length} hunks, generating a separate commit for them...`);
+    const leftoverHunks = leftover.map((id) => hunksMap.get(id) as DiffHunk);
+    const message = await generateLeftoverMessage(
+      config,
+      buildPatchFromHunks(leftoverHunks.filter((h) => !h.wholeFile)) +
+        filterDiffByFiles(fullDiff, leftoverHunks.filter((h) => h.wholeFile).map((h) => h.file)),
+      verbose,
+    );
+    groups.push({ hunkIds: leftover, message });
   }
 
   console.log(`Proposed ${groups.length} commits:\n`);
-  console.log(formatHunkGroups(groups, hunksMap));
+  console.log(formatHunkGroups(groups));
 
-  if (!yes) {
-    const { confirm } = await prompts(
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: `\nProceed with these ${groups.length} commits?`,
-        initial: true,
-      },
-      promptOptions,
-    );
-
-    if (!confirm) {
-      console.log('Split commit cancelled.');
-      return;
-    }
+  if (!(await confirmSplit(groups.length, yes))) {
+    console.log('Split commit cancelled.');
+    return;
   }
 
   if (dryRun) {
@@ -313,53 +368,15 @@ async function runSplitHunksCommit({
     return;
   }
 
-  // Save current HEAD for potential rollback
-  const originalHead = await getCurrentHead(repoRoot);
-  let createdCount = 0;
-
-  try {
-    for (const group of groups) {
-      // Get hunks for this group
-      const groupHunks = group.hunkIds
-        .map((id) => hunksMap.get(id))
-        .filter((h): h is DiffHunk => h !== undefined);
-
-      if (groupHunks.length === 0) {
-        const prefixedMessage = applyPrefix(group.message, prefix);
-        console.warn(`Warning: No valid hunks for commit "${prefixedMessage}", skipping.`);
-        continue;
-      }
-
-      // Build and apply patch
-      const patch = buildPatchFromHunks(groupHunks);
-      await applyPatch(repoRoot, patch);
-
-      // Apply prefix and create commit
-      const prefixedMessage = applyPrefix(group.message, prefix);
-      await commitWithMessage(repoRoot, prefixedMessage);
-      createdCount++;
-      console.log(`Commit ${createdCount}/${groups.length}: ${prefixedMessage}`);
-    }
-
-    console.log(`\nSuccessfully created ${createdCount} commits.`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`\nError during hunk split: ${message}`);
-
-    if (createdCount > 0) {
-      console.error(`Rolling back ${createdCount} commits...`);
-      try {
-        await resetToCommit(repoRoot, originalHead);
-        console.log('Rollback successful. Repository restored to original state.');
-      } catch (rollbackError) {
-        const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : 'Unknown';
-        console.error(`Rollback failed: ${rollbackMsg}`);
-        console.error(`Manual recovery: git reset --mixed ${originalHead}`);
-      }
-    }
-
-    throw error;
-  }
+  await commitGroupsWithRollback(repoRoot, groups, prefix, async (group) => {
+    const groupHunks = group.hunkIds.map((id) => hunksMap.get(id) as DiffHunk);
+    // Binary, mode-only and empty-file changes have no text hunks: stage the whole file
+    await stageFiles(
+      repoRoot,
+      groupHunks.filter((h) => h.wholeFile).map((h) => h.file),
+    );
+    await applyPatch(repoRoot, buildPatchFromHunks(groupHunks.filter((h) => !h.wholeFile)));
+  });
 }
 
 export async function runCommit({
@@ -398,7 +415,6 @@ export async function runCommit({
     await runSplitHunksCommit({
       repoRoot,
       config,
-      status,
       dryRun,
       verbose,
       yes,
@@ -412,7 +428,6 @@ export async function runCommit({
     await runSplitCommit({
       repoRoot,
       config,
-      status,
       dryRun,
       verbose,
       yes,
@@ -450,10 +465,7 @@ export async function runCommit({
 
   const diff = await getStagedDiff(repoRoot);
 
-  const debugInfo: {
-    request?: OpenRouterDebugInfo;
-    response?: OpenRouterDebugInfo;
-  } = {};
+  const debug = createDebugCollector(verbose);
 
   const messages = await generateCommitMessages({
     apiKey: config.openrouterApiKey,
@@ -462,29 +474,9 @@ export async function runCommit({
     diff,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
-    onDebug: (info) => {
-      if (info.stage === 'request') {
-        debugInfo.request = info;
-      } else {
-        debugInfo.response = info;
-      }
-    },
+    onDebug: debug.onDebug,
   });
-
-  if (verbose) {
-    if (debugInfo.request) {
-      console.log('[aicmt] AI request payload:');
-      console.log(JSON.stringify(debugInfo.request.payload, null, 2));
-      console.log('[aicmt] AI request prompt:');
-      console.log(debugInfo.request.prompt);
-    }
-
-    if (debugInfo.response) {
-      const status = debugInfo.response.status ?? 'unknown';
-      console.log(`[aicmt] AI response (status ${status}):`);
-      console.log(debugInfo.response.responseText ?? '');
-    }
-  }
+  debug.print();
 
   let finalMessage = messages[0] ?? '';
 
