@@ -7,11 +7,13 @@ import {
   CONFIG_FILENAME,
   DEFAULT_BASE_URL,
   DEFAULT_COUNT,
+  DEFAULT_HISTORY_EXAMPLES,
   DEFAULT_IGNORE,
   DEFAULT_MAX_TOKENS,
   DEFAULT_TEMPERATURE,
   DEFAULT_TIMEOUT_SECONDS,
   MAX_COUNT,
+  MAX_HISTORY_EXAMPLES,
   MAX_OUTPUT_TOKENS,
   MIN_OUTPUT_TOKENS,
   REPO_CONFIG_FILENAME,
@@ -44,6 +46,7 @@ const settingsShape = {
   maxTokens: z.number().int().positive().optional(),
   count: z.number().int().min(1).max(MAX_COUNT).optional(),
   timeout: z.number().positive().optional(),
+  historyExamples: z.number().int().min(0).max(MAX_HISTORY_EXAMPLES).optional(),
   ignore: z.array(z.string().min(1)).optional(),
   prefix: z.string().min(1).optional(),
   branchPrefix: branchPrefixSchema.optional(),
@@ -85,6 +88,7 @@ export const CONFIG_KEYS: ConfigKey[] = [
   'maxTokens',
   'count',
   'timeout',
+  'historyExamples',
   'ignore',
   'prefix',
   'branchPrefix',
@@ -103,6 +107,7 @@ export interface ResolvedConfig {
   maxTokens: number;
   count: number;
   timeoutMs: number;
+  historyExamples: number;
   ignore: string[];
   prefix?: string;
   branchPrefix?: BranchPrefix;
@@ -241,7 +246,7 @@ export function resolveConfig({
     );
   }
 
-  for (const key of ['baseUrl', 'temperature', 'maxTokens', 'count', 'timeout'] as const) {
+  for (const key of ['baseUrl', 'temperature', 'maxTokens', 'count', 'timeout', 'historyExamples'] as const) {
     sources[key] = sources[key] ?? 'default';
   }
 
@@ -257,6 +262,7 @@ export function resolveConfig({
       maxTokens: clampMaxTokens(merged.maxTokens ?? DEFAULT_MAX_TOKENS),
       count: merged.count ?? DEFAULT_COUNT,
       timeoutMs: (merged.timeout ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
+      historyExamples: merged.historyExamples ?? DEFAULT_HISTORY_EXAMPLES,
       ignore: [...new Set([...DEFAULT_IGNORE, ...extraIgnore])],
       prefix: merged.prefix,
       branchPrefix: merged.branchPrefix,

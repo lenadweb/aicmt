@@ -354,6 +354,22 @@ export async function applyPatch(repoRoot: string, patch: string): Promise<void>
   }
 }
 
+/** Subjects of the latest non-merge commits, newest first (empty in a repo without commits). */
+export async function getRecentCommitSubjects(repoRoot: string, limit: number): Promise<string[]> {
+  if (limit <= 0 || !(await hasHead(repoRoot))) {
+    return [];
+  }
+
+  const result = await runGit(['log', `-n${limit}`, '--no-merges', '--format=%s'], repoRoot);
+  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+/** Path inside the git directory, e.g. "hooks/pre-commit" (respects core.hooksPath). */
+export async function getGitPath(cwd: string, name: string): Promise<string> {
+  const result = await runGit(['rev-parse', '--git-path', name], cwd);
+  return result.stdout.trim();
+}
+
 /** Current branch name, or undefined on a detached HEAD. */
 export async function getCurrentBranch(repoRoot: string): Promise<string | undefined> {
   try {

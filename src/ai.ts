@@ -1,4 +1,3 @@
-import { fetch } from 'undici';
 import type { ResolvedConfig } from './config';
 import { extractFileFromDiffHeader } from './git';
 import { createPathMatcher, sleep } from './utils';
@@ -15,7 +14,12 @@ export type AiSettings = Pick<
   | 'maxTokens'
   | 'timeoutMs'
   | 'ignore'
->;
+> & {
+  /** Recent commit messages of the repository, used as style examples. */
+  examples?: string[];
+  /** A prefix is added after generation, so the model must not write one. */
+  prefixAddedLater?: boolean;
+};
 
 interface CompletionResponse {
   choices?: Array<{
@@ -199,10 +203,26 @@ function prepareDiff(diff: string, ignore: string[]): string {
   return trimmed ? compressLargeNewFiles(omitIgnoredFiles(trimmed, ignore)) : '[No diff available]';
 }
 
-function formatInstructions({ instructions, language }: AiSettings): string {
-  return language
-    ? `${instructions}\nWrite commit messages in ${language}.`
-    : instructions;
+function formatInstructions({ instructions, language, examples, prefixAddedLater }: AiSettings): string {
+  const parts = [instructions];
+
+  if (language) {
+    parts.push(`Write commit messages in ${language}.`);
+  }
+
+  if (prefixAddedLater) {
+    parts.push('Do not add ticket ids or similar prefixes: they are added automatically.');
+  }
+
+  if (examples && examples.length > 0) {
+    parts.push(
+      '',
+      'Recent commit messages in this repository. Match their style (format, casing, length, language) where it does not conflict with the instructions above. Do not copy their content:',
+      ...examples.map((example) => `- ${example}`),
+    );
+  }
+
+  return parts.join('\n');
 }
 
 function normalizeMessages(messages: string[], count: number): string[] {

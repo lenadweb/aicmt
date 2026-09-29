@@ -8,6 +8,8 @@ export const DEFAULT_MAX_TOKENS = 120;
 export const DEFAULT_COUNT = 3;
 export const MAX_COUNT = 10;
 export const DEFAULT_TIMEOUT_SECONDS = 60;
+export const DEFAULT_HISTORY_EXAMPLES = 10;
+export const MAX_HISTORY_EXAMPLES = 50;
 export const MIN_OUTPUT_TOKENS = 32;
 export const MAX_OUTPUT_TOKENS = 512;
 

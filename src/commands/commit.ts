@@ -9,6 +9,7 @@ import {
   getCurrentBranch,
   getCurrentHead,
   getGitEditor,
+  getRecentCommitSubjects,
   getRepoRoot,
   getStagedDiff,
   getStatus,
@@ -23,6 +24,7 @@ import {
 } from '../git';
 import {
   AiDebugInfo,
+  AiSettings,
   CommitGroup,
   generateCommitGroups,
   generateCommitGroupsFromHunks,
@@ -57,6 +59,7 @@ export interface CommitOptions {
 interface SplitCommitOptions {
   repoRoot: string;
   config: ResolvedConfig;
+  ai: AiSettings;
   dryRun: boolean;
   verbose: boolean;
   yes: boolean;
@@ -121,7 +124,7 @@ function formatHunkGroups(groups: HunkCommitGroup[]): string {
     .join('\n\n');
 }
 
-function applyPrefix(message: string, prefix?: string): string {
+export function applyPrefix(message: string, prefix?: string): string {
   if (!prefix || message.startsWith(prefix)) {
     return message;
   }
@@ -144,7 +147,10 @@ export function prefixFromBranch(branch: string, { pattern, template }: BranchPr
   );
 }
 
-async function resolvePrefix(repoRoot: string, config: ResolvedConfig): Promise<string | undefined> {
+export async function resolvePrefix(
+  repoRoot: string,
+  config: ResolvedConfig,
+): Promise<string | undefined> {
   if (config.prefix) {
     return config.prefix;
   }
@@ -157,6 +163,45 @@ async function resolvePrefix(repoRoot: string, config: ResolvedConfig): Promise<
   return branch ? prefixFromBranch(branch, config.branchPrefix) : undefined;
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Removes a prefix that aicmt itself adds (fixed or from the branch) from a past message,
+ * so the model does not learn to write an old ticket id into new messages.
+ */
+export function stripAutoPrefix(message: string, config: ResolvedConfig): string {
+  if (config.prefix && message.startsWith(config.prefix)) {
+    return message.slice(config.prefix.length);
+  }
+
+  if (config.branchPrefix) {
+    const { pattern, template } = config.branchPrefix;
+    const source = (template ?? '{match}: ')
+      .split(/\{(?:match|\d+)\}/)
+      .map(escapeRegExp)
+      .join(`(?:${pattern})`);
+    return message.replace(new RegExp(`^${source}`), '');
+  }
+
+  return message;
+}
+
+/** Settings for the model: config plus the repository's recent messages as style examples. */
+export async function buildAiSettings(
+  repoRoot: string,
+  config: ResolvedConfig,
+  prefix: string | undefined,
+): Promise<AiSettings> {
+  const subjects = await getRecentCommitSubjects(repoRoot, config.historyExamples);
+  const examples = [
+    ...new Set(subjects.map((subject) => stripAutoPrefix(subject, config).trim()).filter(Boolean)),
+  ];
+
+  return { ...config, examples, prefixAddedLater: Boolean(prefix) };
+}
+
 async function ensureHead(repoRoot: string): Promise<void> {
   if (!(await hasHead(repoRoot))) {
     throw new Error('Split mode needs at least one existing commit. Create the initial commit first.');
@@ -165,13 +210,13 @@ async function ensureHead(repoRoot: string): Promise<void> {
 
 /** Commit message for changes the model left out of its grouping. */
 async function generateLeftoverMessage(
-  config: ResolvedConfig,
+  ai: AiSettings,
   diff: string,
   verbose: boolean,
 ): Promise<string> {
   const debug = createDebugCollector(verbose);
   const messages = await withSpinner('Generating message for the remaining changes...', () =>
-    generateCommitMessages({ settings: config, diff, count: 1, onDebug: debug.onDebug }),
+    generateCommitMessages({ settings: ai, diff, count: 1, onDebug: debug.onDebug }),
   );
   debug.print();
   return messages[0];
@@ -249,7 +294,7 @@ async function commitGroupsWithRollback<T extends { message: string }>(
 
 async function runSplitCommit({
   repoRoot,
-  config,
+  ai,
   dryRun,
   verbose,
   yes,
@@ -269,7 +314,7 @@ async function runSplitCommit({
 
   // Ask AI to group the files into logical commits
   const rawGroups = await withSpinner(`Analyzing ${files.length} changed files...`, () =>
-    generateCommitGroups({ settings: config, diff, files, onDebug: debug.onDebug }),
+    generateCommitGroups({ settings: ai, diff, files, onDebug: debug.onDebug }),
   );
   debug.print();
 
@@ -278,7 +323,7 @@ async function runSplitCommit({
   if (leftover.length > 0) {
     console.log(`AI skipped ${leftover.length} files, generating a separate commit for them.`);
     const message = await generateLeftoverMessage(
-      config,
+      ai,
       filterDiffByFiles(diff, leftover),
       verbose,
     );
@@ -310,6 +355,7 @@ async function runSplitCommit({
 async function runSplitHunksCommit({
   repoRoot,
   config,
+  ai,
   dryRun,
   verbose,
   yes,
@@ -341,7 +387,7 @@ async function runSplitHunksCommit({
     `Analyzing ${hunks.length} hunks across ${hunkDiff.files.length} files...`,
     () =>
       generateCommitGroupsFromHunks({
-        settings: config,
+        settings: ai,
         hunks: hunks.map((h) => ({
           id: h.id,
           file: h.file,
@@ -359,7 +405,7 @@ async function runSplitHunksCommit({
     console.log(`AI skipped ${leftover.length} hunks, generating a separate commit for them.`);
     const leftoverHunks = leftover.map((id) => hunksMap.get(id) as DiffHunk);
     const message = await generateLeftoverMessage(
-      config,
+      ai,
       buildPatchFromHunks(leftoverHunks.filter((h) => !h.wholeFile)) +
         filterDiffByFiles(fullDiff, leftoverHunks.filter((h) => h.wholeFile).map((h) => h.file)),
       verbose,
@@ -563,7 +609,8 @@ export async function runCommit({
     throw new Error('No changes to commit.');
   }
 
-  const splitOptions = { repoRoot, config, dryRun, verbose, yes, prefix };
+  const ai = await buildAiSettings(repoRoot, config, prefix);
+  const splitOptions = { repoRoot, config, ai, dryRun, verbose, yes, prefix };
 
   // Hunk-level split mode (experimental)
   if (splitHunks) {
@@ -588,7 +635,7 @@ export async function runCommit({
     const debug = createDebugCollector(verbose);
     const messages = await withSpinner('Generating commit messages...', () =>
       generateCommitMessages({
-        settings: config,
+        settings: ai,
         diff,
         count: yes ? 1 : config.count,
         onDebug: debug.onDebug,

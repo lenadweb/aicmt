@@ -19,7 +19,7 @@ interface ConfigCommandOptions {
   configPath?: string;
 }
 
-const NUMBER_KEYS: ConfigKey[] = ['temperature', 'maxTokens', 'count', 'timeout'];
+const NUMBER_KEYS: ConfigKey[] = ['temperature', 'maxTokens', 'count', 'timeout', 'historyExamples'];
 
 function assertKey(key: string): ConfigKey {
   if (!CONFIG_KEYS.includes(key as ConfigKey)) {
